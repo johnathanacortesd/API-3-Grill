@@ -36,6 +36,7 @@ def load_custom_css():
     --accent-bg:#fff7ed;--accent-bg2:#ffedd5;--accent-bdr:#fed7aa;
     --green:#059669;--green2:#047857;--green-bg:#ecfdf5;--green-bdr:#a7f3d0;
     --red:#dc2626;--amber:#d97706;--blue:#1a73e8;
+    --ia:#7c3aed;--ia2:#6d28d9;--ia3:#5b21b6;--ia-bg:#f5f3ff;--ia-bg2:#ede9fe;--ia-bdr:#ddd6fe;
     --r:8px;--r2:12px;--r3:16px;--r4:20px;
     --shadow-sm:0 1px 2px rgba(60,64,67,0.1),0 1px 3px rgba(60,64,67,0.08);
     --shadow-md:0 1px 3px rgba(60,64,67,0.12),0 4px 8px rgba(60,64,67,0.08);
@@ -137,6 +138,31 @@ hr{border-color:var(--s3)!important;margin:0.5rem 0!important}
     .live-metrics{grid-template-columns:1fr 1fr 1fr}
     .app-header{flex-direction:column;text-align:center;gap:0.5rem;padding:1rem}
 }
+
+/* ===== Bloque de Análisis con IA (tema morado, diferenciado del resto) ===== */
+.ia-card{
+    background:linear-gradient(180deg,var(--ia-bg) 0%,#ffffff 55%);
+    border:1.5px solid var(--ia-bdr);border-radius:var(--r3);
+    padding:1rem 1.2rem 1.1rem;margin:0.9rem 0 0.6rem;position:relative;overflow:hidden;
+    box-shadow:0 1px 3px rgba(124,58,237,0.08),0 4px 14px rgba(124,58,237,0.06);
+}
+.ia-card::before{content:'';position:absolute;top:0;left:0;right:0;height:3px;background:linear-gradient(90deg,#7c3aed,#a78bfa,#c4b5fd);}
+.ia-card-head{display:flex;align-items:center;gap:0.7rem;margin-bottom:0.6rem;flex-wrap:wrap;}
+.ia-card-icon{width:36px;height:36px;background:linear-gradient(135deg,#7c3aed,#6d28d9);border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:1.05rem;color:#fff;flex-shrink:0;box-shadow:0 2px 8px rgba(124,58,237,0.35);}
+.ia-card-title{font-family:'Google Sans',sans-serif;font-size:0.98rem;font-weight:700;color:var(--ia3);line-height:1.2}
+.ia-card-sub{font-size:0.76rem;color:var(--text3);margin-top:0.1rem}
+.ia-card-badge{margin-left:auto;background:var(--ia-bg2);border:1px solid var(--ia-bdr);color:var(--ia2);font-family:'Roboto Mono',monospace;font-size:0.6rem;font-weight:600;padding:0.22rem 0.65rem;border-radius:100px;letter-spacing:0.04em;text-transform:uppercase;white-space:nowrap;}
+.ia-card [data-testid="stCheckbox"]{background:#fff;border:1.5px solid var(--ia-bdr);border-radius:var(--r2);padding:0.6rem 0.85rem;margin-bottom:0.3rem;transition:var(--transition);}
+.ia-card [data-testid="stCheckbox"]:hover{border-color:var(--ia);box-shadow:0 0 0 3px rgba(124,58,237,0.1);}
+.ia-card [data-testid="stCheckbox"] label p{font-weight:600!important;color:var(--ia3)!important;font-size:0.88rem!important;}
+.ia-card [data-testid="stCheckbox"] svg{color:var(--ia)!important}
+.ia-card [data-testid="stWidgetLabel"] p{color:var(--ia3)!important}
+.ia-card [data-testid="stTextInput"] input{border-color:var(--ia-bdr)!important;}
+.ia-card [data-testid="stTextInput"] input:focus{border-color:var(--ia)!important;box-shadow:0 0 0 3px rgba(124,58,237,0.12)!important;}
+.ia-fields-wrap{background:#fff;border:1px solid var(--ia-bdr);border-radius:var(--r2);padding:0.7rem 0.8rem 0.2rem;margin-top:0.5rem;}
+.ia-hint{background:var(--ia-bg2);border:1px solid var(--ia-bdr);color:var(--ia3);border-radius:var(--r);padding:0.5rem 0.75rem;font-size:0.75rem;line-height:1.35;margin-top:0.5rem;}
+.step-item.is-active.ia-step .dot{border-color:var(--ia);background:var(--ia-bg);color:var(--ia2);}
+.step-item.is-active.ia-step{color:var(--ia2)!important}
 </style>
 """, unsafe_allow_html=True)
 
@@ -288,6 +314,8 @@ def _render_live_html(pct, msg, elapsed, file_label, active_key, ia_enabled):
             cls, mark = "is-done", "✓"
         else:
             cls, mark = "", ""
+        if key == "ia" and cls == "is-active":
+            cls += " ia-step"
         steps_html.append(
             f'<div class="step-item {cls}"><span class="dot">{mark}</span>{label}</div>'
         )
@@ -458,13 +486,26 @@ def main():
 
             f1 = st.file_uploader("Dossier", type=["xlsx"], label_visibility="collapsed", key="f1")
 
-            st.markdown('<div class="sec-label">Análisis de Tono / Tema / Subtema con IA (opcional)</div>', unsafe_allow_html=True)
+            st.markdown("""
+            <div class="ia-card">
+                <div class="ia-card-head">
+                    <div class="ia-card-icon">✦</div>
+                    <div>
+                        <div class="ia-card-title">Análisis de Tono, Tema y Subtema con IA</div>
+                        <div class="ia-card-sub">Opcional · usa gpt-4.1-nano enfocado en tu marca</div>
+                    </div>
+                    <div class="ia-card-badge">Nuevo</div>
+                </div>
+            """, unsafe_allow_html=True)
+
             habilitar_ia = st.checkbox(
-                "Activar análisis con IA (gpt-4.1-nano)",
+                "✓ Activar análisis con IA para este dossier",
                 value=False,
                 help="Agrega al final del Excel las columnas Tono_IA, Tema_IA y Subtema_IA, "
                      "enfocadas en cómo aparece la marca/alias dentro de cada noticia.",
             )
+
+            st.markdown('<div class="ia-fields-wrap">', unsafe_allow_html=True)
             col_m1, col_m2 = st.columns(2)
             with col_m1:
                 marca = st.text_input("Marca principal", placeholder="Ej: Universidad X")
@@ -473,6 +514,14 @@ def main():
                     "Alias (separados por coma)",
                     placeholder="Ej: UX, Universidad de X, La Universidad",
                 )
+            st.markdown("</div>", unsafe_allow_html=True)
+
+            st.markdown(
+                '<div class="ia-hint">Marca la casilla ✓ de arriba y escribe al menos la Marca principal '
+                'para que el análisis se ejecute. Necesitas OPENAI_API_KEY configurada en los Secrets.</div>',
+                unsafe_allow_html=True,
+            )
+            st.markdown("</div>", unsafe_allow_html=True)
 
             if st.form_submit_button("▶ Iniciar Limpieza", use_container_width=True, type="primary"):
                 if not f1:
