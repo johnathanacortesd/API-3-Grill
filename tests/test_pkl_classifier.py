@@ -10,7 +10,7 @@ import joblib
 import numpy as np
 import pandas as pd
 from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.linear_model import LogisticRegression
+from sklearn.naive_bayes import MultinomialNB
 from sklearn.pipeline import Pipeline
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -33,7 +33,7 @@ def _make_pipeline(texts, labels):
     pipe = Pipeline(
         [
             ("tfidf", TfidfVectorizer()),
-            ("clf", LogisticRegression(max_iter=400, solver="lbfgs")),
+            ("clf", MultinomialNB()),
         ]
     )
     pipe.fit(list(texts), list(labels))
