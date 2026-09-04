@@ -1,5 +1,5 @@
 # ======================================
-# Pipeline de limpieza (sin Streamlit)
+# Pipeline de limpieza y análisis (pipeline.py)
 # ======================================
 import datetime
 import gc
@@ -20,6 +20,8 @@ from openpyxl import load_workbook
 from openpyxl.utils.cell import column_index_from_string, coordinate_from_string, range_boundaries
 from unidecode import unidecode
 
+from ai_analyzer import enrich_rows_with_ai
+
 logger = logging.getLogger("limpieza_grill")
 
 ProgressCb = Optional[Callable[[int, str], None]]
@@ -33,23 +35,16 @@ TIPO_MEDIO_MAP = {
     "revista": "Revistas", "revistas": "Revistas",
 }
 
-OUTPUT_COLUMNS = [
+# Columnas base (sin las 11 manuales obsoletas)
+BASE_OUTPUT_COLUMNS = [
     "ID Noticia", "Fecha", "Hora", "Medio", "Tipo de Medio",
     "Sección - Programa", "Región", "Título", "Autor - Conductor",
     "Nro. Pagina", "Dimensión", "Duración - Nro. Caracteres",
-    "CPE", "Tier", "Audiencia", "Tono", "Tema", "Subtema",
-    "Producto", "Tipo de información", "Nombre vocero",
-    "Mención en Titulo", "Mención en Foto", "Tipo mencion",
-    "Tipo mencion 2", "Aparece Logo", "revalorización", "resumen corto",
+    "CPE", "Tier", "Audiencia",
+    "revalorización", "resumen corto",
     "Link Nota", "Resumen - Aclaracion", "Link (Streaming - Imagen)", "Menciones - Empresa",
     "ID duplicada",
 ]
-
-# Columnas nuevas del análisis con IA (Tono/Tema/Subtema centrados en la marca).
-# Se agregan al final del Excel de salida SOLO cuando se pide el análisis IA
-# (ver `ia_columns` en process_dossier / generate_output_excel). No afectan
-# en nada el flujo de limpieza existente si no se usan.
-IA_OUTPUT_COLUMNS = ["Tono_IA", "Tema_IA", "Subtema_IA"]
 
 KEY_MAP = {
     "idnoticia": "ID Noticia",
@@ -67,17 +62,6 @@ KEY_MAP = {
     "cpe": "CPE",
     "tier": "Tier",
     "audiencia": "Audiencia",
-    "tono": "Tono",
-    "tema": "Tema",
-    "subtema": "Subtema",
-    "producto": "Producto",
-    "tipo_de_informacion": "Tipo de información",
-    "nombre_vocero": "Nombre vocero",
-    "mencion_en_titulo": "Mención en Titulo",
-    "mencion_en_foto": "Mención en Foto",
-    "tipo_mencion": "Tipo mencion",
-    "tipo_mencion_2": "Tipo mencion 2",
-    "aparece_logo": "Aparece Logo",
     "revalorizacion": "revalorización",
     "resumen_corto": "resumen corto",
     "link_nota": "Link Nota",
@@ -89,7 +73,7 @@ KEY_MAP = {
 
 THOUSANDS_COLS = {"Nro. Pagina", "Dimensión", "Duración - Nro. Caracteres", "Tier", "Audiencia"}
 CURRENCY_COLS = {"CPE", "revalorización"}
-NUMERIC_COLS = {"ID Noticia"} | THOUSANDS_COLS | CURRENCY_COLS
+NUMERIC_COLS = {"ID Noticia", "ID duplicada"} | THOUSANDS_COLS | CURRENCY_COLS
 
 REL_NS = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}"
 HYPERLINK_TAIL_BYTES = 4 * 1024 * 1024
@@ -136,7 +120,6 @@ def _workbook_rel_path(target: str) -> str:
 
 
 def extract_hyperlinks_from_xlsx(xlsx_bytes: bytes, sheet_title: str) -> Dict[Tuple[int, int], str]:
-    """Map (row, col) 1-based -> URL for external hyperlinks, without loading cells."""
     result: Dict[Tuple[int, int], str] = {}
     try:
         with ZipFile(io.BytesIO(xlsx_bytes)) as zf:
@@ -243,7 +226,6 @@ def norm_key(text):
 
 
 def get_column_robust(df, name):
-    """Busca una columna de forma insensible a mayúsculas, minúsculas, espacios y tildes."""
     name_norm = norm_key(name)
     for col in df.columns:
         if norm_key(col) == name_norm:
@@ -254,32 +236,26 @@ def get_column_robust(df, name):
 def clean_text(text):
     if not isinstance(text, str):
         return text
-    text = re.sub(r"\s+", " ", text)
-    return text.strip()
+    return re.sub(r"\s+", " ", text).strip()
 
 
 def clean_cuerpo(text):
-    if not isinstance(text, str) or text.strip() == "":
-        return text
+    if not isinstance(text, str) or text.strip() in ("", "nan", "None"):
+        return ""
     text = re.sub(r"<br\s*/?>", "\n", text, flags=re.IGNORECASE)
     text = re.sub(r"<[^>]+>", "", text)
     return text.strip()
 
 
-def normalize_title_for_comparison(title):
+def clean_title_for_output(title):
     if not isinstance(title, str):
         return ""
-    tmp = re.split(r"\s*[:|-]\s*", title, 1)
-    return re.sub(r"\W+", " ", tmp[0]).lower().strip()
-
-
-def clean_title_for_output(title):
-    return re.sub(r"\s*\|\s*[\w\s]+$", "", str(title)).strip()
+    return re.sub(r"\s+", " ", str(title)).strip()
 
 
 def corregir_texto(text):
-    if not isinstance(text, str):
-        return text
+    if not isinstance(text, str) or text.strip() in ("", "nan", "None"):
+        return ""
     text = re.sub(r"(<br>|\[\.\.\.\]|\s+)", " ", text).strip()
     m = re.search(r"[A-ZÁÉÍÓÚÑ]", text)
     if m:
@@ -345,21 +321,6 @@ def parse_numeric(val):
         return None
 
 
-def mapped_tono(val):
-    if pd.isna(val) or val is None:
-        return ""
-    s = str(val).strip().lower()
-    if "positiv" in s:
-        return "Positivo"
-    elif "neutr" in s:
-        return "Neutro"
-    elif "negativ" in s:
-        return "Negativo"
-    if s in ("", "nan", "none"):
-        return ""
-    return str(val).strip()
-
-
 # ======================================
 # Algoritmo de Duplicados
 # ======================================
@@ -374,7 +335,6 @@ def _normalizar_url(url: str) -> str:
 
 
 def _extract_url(val) -> str:
-    """URL desde hipervínculo {value,url}, texto http, o vacío."""
     if val is None:
         return ""
     if isinstance(val, dict):
@@ -388,7 +348,6 @@ def _extract_url(val) -> str:
 
 
 def _normalizar_hora(val) -> str:
-    """Compara horas de AV como HH:MM:SS (10:00 == 10:00:00)."""
     if val is None:
         return ""
     if isinstance(val, float) and pd.isna(val):
@@ -413,15 +372,6 @@ def _normalizar_hora(val) -> str:
 
 
 def detectar_duplicados_avanzado(rows, km):
-    """
-    Reglas (el título no decide duplicados):
-
-    - Internet / gráfica: misma URL Nota + misma Menciones - Empresa → duplicada.
-      Distinta URL Nota, aunque la mención (o el título) coincida → no es duplicada.
-    - AM / FM / Aire / Cable / Radio / Televisión: misma mención + mismo Medio +
-      misma Hora → duplicada. Distinta hora → no es duplicada (aunque el título
-      sea igual o parecido).
-    """
     processed = rows
     seen_url = {}
     seen_bcast = {}
@@ -468,12 +418,11 @@ def detectar_duplicados_avanzado(rows, km):
 # Lectura y Estructuración de Datos
 # ======================================
 def load_dossier_dataframe(file_bytes: bytes, progress: ProgressCb = None) -> pd.DataFrame:
-    """Lee el xlsx con Calamine (Rust) y fusiona hipervínculos del XML."""
     emit_progress(progress, 8, "Abriendo archivo Excel…")
     try:
         return _load_dossier_calamine(file_bytes, progress)
     except Exception:
-        logger.exception("Calamine no pudo leer el xlsx; se usa openpyxl en modo streaming.")
+        logger.exception("Calamine no pudo leer el xlsx; se usa openpyxl.")
         return _load_dossier_openpyxl(file_bytes, progress)
 
 
@@ -515,11 +464,10 @@ def _load_dossier_calamine(file_bytes: bytes, progress: ProgressCb = None) -> pd
     sheet_title = wb.sheet_names[0]
     emit_progress(progress, 12, f"Extrayendo hipervínculos de «{sheet_title}»…")
     hyperlinks = extract_hyperlinks_from_xlsx(file_bytes, sheet_title)
-    logger.info("Hoja '%s': %s hipervínculos externos (calamine)", sheet_title, len(hyperlinks))
-    emit_progress(progress, 16, "Leyendo celdas del Excel (archivos grandes tardan aquí)…")
+    emit_progress(progress, 16, "Leyendo celdas del Excel…")
     sheet = wb.get_sheet_by_name(sheet_title)
     data = sheet.to_python(skip_empty_area=False)
-    emit_progress(progress, 22, f"Celdas leídas ({len(data)} filas en hoja). Armando tabla…")
+    emit_progress(progress, 22, f"Celdas leídas ({len(data)} filas). Armando tabla…")
     if not data:
         return pd.DataFrame()
     raw_headers = list(data[0])
@@ -535,7 +483,6 @@ def _load_dossier_openpyxl(file_bytes: bytes, progress: ProgressCb = None) -> pd
         sheet_title = sheet.title or "Sheet"
         emit_progress(progress, 12, f"Extrayendo hipervínculos de «{sheet_title}»…")
         hyperlinks = extract_hyperlinks_from_xlsx(file_bytes, sheet_title)
-        logger.info("Hoja '%s': %s hipervínculos externos (openpyxl)", sheet_title, len(hyperlinks))
         emit_progress(progress, 16, "Leyendo filas del dossier…")
         it = sheet.iter_rows()
         header_row = next(it, None)
@@ -555,12 +502,10 @@ def normalize_dossier_dataframe(df, region_map, internet_map, progress: Progress
 
     emit_progress(progress, 42, "Normalizando tipo de medio, región y columnas…")
 
-    tipo_medio_map = TIPO_MEDIO_MAP
-
     if "Tipo de Medio" in df.columns:
         df["Tipo de Medio"] = (
             df["Tipo de Medio"].astype(str).str.lower().str.strip()
-            .map(tipo_medio_map)
+            .map(TIPO_MEDIO_MAP)
             .fillna(df["Tipo de Medio"].astype(str).str.strip())
         )
     else:
@@ -570,7 +515,16 @@ def normalize_dossier_dataframe(df, region_map, internet_map, progress: Progress
     is_grafica = df["Tipo de Medio"].isin(["Prensa", "Internet", "Revistas"])
     is_internet = df["Tipo de Medio"] == "Internet"
 
-    raw_resumen_orig = get_column_robust(df, "Resumen - Aclaracion")
+    # BÚSQUEDA ROBUSTA DEL RESUMEN
+    cuerpo_series = get_column_robust(df, "CuerpoEs")
+    if cuerpo_series.dropna().empty:
+        cuerpo_series = get_column_robust(df, "Resumen - Aclaracion")
+    if cuerpo_series.dropna().empty:
+        cuerpo_series = get_column_robust(df, "Resumen")
+    if cuerpo_series.dropna().empty:
+        cuerpo_series = get_column_robust(df, "Cuerpo")
+
+    raw_resumen_orig = cuerpo_series
 
     if "Medio" in df.columns:
         raw_medios_clean = df["Medio"].astype(str).str.lower().str.strip()
@@ -613,26 +567,11 @@ def normalize_dossier_dataframe(df, region_map, internet_map, progress: Progress
     df["Tier"] = df.get("Tier", pd.Series(dtype=str))
     df["Audiencia"] = df.get("Audiencia", pd.Series(dtype=str))
 
-    df["Tono"] = get_column_robust(df, "Tono").apply(mapped_tono)
-
-    df["Tema"] = get_column_robust(df, "Tematica").fillna("").astype(str).apply(clean_text)
-    df["Subtema"] = get_column_robust(df, "Subtema").fillna("").astype(str).apply(clean_text)
-
-    df["Producto"] = get_column_robust(df, "Producto").fillna("").astype(str).apply(clean_text)
-    df["Tipo de información"] = get_column_robust(df, "Tipo de información").fillna("").astype(str).apply(clean_text)
-    df["Nombre vocero"] = get_column_robust(df, "Nombre vocero").fillna("").astype(str).apply(clean_text)
-    df["Mención en Titulo"] = get_column_robust(df, "Mención en Titulo").fillna("").astype(str).apply(clean_text)
-    df["Mención en Foto"] = get_column_robust(df, "Mención en Foto").fillna("").astype(str).apply(clean_text)
-    df["Tipo mencion"] = get_column_robust(df, "Tipo mencion").fillna("").astype(str).apply(clean_text)
-    df["Tipo mencion 2"] = get_column_robust(df, "Tipo mencion 2").fillna("").astype(str).apply(clean_text)
-    df["Aparece Logo"] = get_column_robust(df, "Aparece Logo").fillna("").astype(str).apply(clean_text)
-
     df["resumen corto"] = raw_resumen_orig.fillna("").astype(str).str.strip()
 
     emit_progress(progress, 48, "Limpiando cuerpos y enlaces…")
 
-    cuerpo_col = "CuerpoEs" if "CuerpoEs" in df.columns else "Resumen - Aclaracion"
-    cuerpo_cleaned = df.get(cuerpo_col, pd.Series([""] * len(df))).astype(str).apply(clean_cuerpo)
+    cuerpo_cleaned = raw_resumen_orig.astype(str).apply(clean_cuerpo)
 
     def fmt_grafica(text):
         if not isinstance(text, str) or not text.strip():
@@ -688,33 +627,6 @@ def normalize_dossier_dataframe(df, region_map, internet_map, progress: Progress
     return df
 
 
-def read_and_normalize_dossier(sheet, region_map, internet_map):
-    """Compatibilidad: acepta una hoja openpyxl (modo normal, no read_only)."""
-    it = sheet.iter_rows()
-    header_row = next(it, None)
-    if header_row is None:
-        return pd.DataFrame()
-    raw_headers = [c.value for c in header_row]
-    rows = []
-    for ridx, row in enumerate(it, start=2):
-        if all(c.value is None for c in row):
-            continue
-        row_data = {}
-        for i, h in enumerate(raw_headers):
-            if not h or i >= len(row):
-                continue
-            cell = row[i]
-            val = cell.value
-            url = cell.hyperlink.target if (getattr(cell, "hyperlink", None) and cell.hyperlink.target) else None
-            if url:
-                row_data[h] = {"value": val or "Link", "url": url}
-            else:
-                row_data[h] = val
-        rows.append(row_data)
-    df = pd.DataFrame(rows)
-    return normalize_dossier_dataframe(df, region_map, internet_map)
-
-
 def expand_menciones(df) -> List[dict]:
     records = df.to_dict("records")
     rows_expanded = []
@@ -739,18 +651,8 @@ def expand_menciones(df) -> List[dict]:
 # ======================================
 # Exportar a Excel (XlsxWriter, streaming)
 # ======================================
-def generate_output_excel(rows, km, progress: ProgressCb = None, extra_columns: Optional[List[str]] = None):
-    """
-    Genera el xlsx de salida con XlsxWriter en constant_memory.
-    Es el motor adecuado para esta limpieza: escribe en streaming, soporta
-    hipervínculos y formatos, y no retiene el libro completo en RAM.
-
-    `extra_columns`: columnas adicionales a añadir AL FINAL (ej. las de IA:
-    Tono_IA, Tema_IA, Subtema_IA). Si no se pasa, el archivo queda idéntico
-    al que ya se generaba antes de esta función.
-    """
-    columns = OUTPUT_COLUMNS + list(extra_columns or [])
-
+def generate_output_excel(rows, km, progress: ProgressCb = None, columns_to_use: List[str] = None):
+    cols = columns_to_use or BASE_OUTPUT_COLUMNS
     buf = io.BytesIO()
     wb = xlsxwriter.Workbook(
         buf,
@@ -766,13 +668,15 @@ def generate_output_excel(rows, km, progress: ProgressCb = None, extra_columns: 
     fmt_date = wb.add_format({"num_format": "DD/MM/YYYY"})
     fmt_currency = wb.add_format({"num_format": "$#,##0"})
     fmt_thousands = wb.add_format({"num_format": "#,##0"})
+    # Formato entero plano sin puntos de miles ni decimales para IDs
+    fmt_plain_id = wb.add_format({"num_format": "0"})
 
-    for i, col_name in enumerate(columns):
-        if col_name in ["Título", "Resumen - Aclaracion", "resumen corto"]:
-            ws.set_column(i, i, 50)
+    for i, col_name in enumerate(cols):
+        if col_name in ["Título", "Resumen - Aclaracion", "resumen corto", "Contexto analizado"]:
+            ws.set_column(i, i, 55)
         elif col_name in ["Link Nota", "Link (Streaming - Imagen)"]:
             ws.set_column(i, i, 15)
-        elif col_name in IA_OUTPUT_COLUMNS:
+        elif col_name in ["Subtema_IA", "Tema_IA"]:
             ws.set_column(i, i, 28)
         else:
             ws.set_column(i, i, 20)
@@ -783,15 +687,14 @@ def generate_output_excel(rows, km, progress: ProgressCb = None, extra_columns: 
     emit_progress(progress, 0, f"Generando archivo de resultado… 0/{n} filas")
 
     try:
-        _write_xlsx_rows(ws, rows, km, n, step, progress, fmt_link, fmt_date, fmt_currency, fmt_thousands, columns)
+        _write_xlsx_rows(ws, rows, km, n, step, progress, fmt_link, fmt_date, fmt_currency, fmt_thousands, fmt_plain_id, cols)
         emit_progress(progress, 100, "Guardando archivo Excel…")
     finally:
         wb.close()
     return buf.getvalue()
 
 
-def _write_xlsx_rows(ws, rows, km, n, step, progress, fmt_link, fmt_date, fmt_currency, fmt_thousands, columns=None):
-    columns = columns if columns is not None else OUTPUT_COLUMNS
+def _write_xlsx_rows(ws, rows, km, n, step, progress, fmt_link, fmt_date, fmt_currency, fmt_thousands, fmt_plain_id, cols):
     for i, row in enumerate(rows):
         tk = km.get("titulo")
         if tk and tk in row:
@@ -801,7 +704,7 @@ def _write_xlsx_rows(ws, rows, km, n, step, progress, fmt_link, fmt_date, fmt_cu
             row[rk] = corregir_texto(row.get(rk))
 
         excel_row = i + 1
-        for cidx, h in enumerate(columns):
+        for cidx, h in enumerate(cols):
             val = row.get(h)
             cv = None
             url = None
@@ -813,6 +716,17 @@ def _write_xlsx_rows(ws, rows, km, n, step, progress, fmt_link, fmt_date, fmt_cu
                     cv = val
                 else:
                     cv = str(val)
+            # ID Noticia e ID duplicada se procesan como enteros puros sin separadores
+            elif h in ("ID Noticia", "ID duplicada"):
+                if val is not None and str(val).strip() not in ("", "nan", "None", "-"):
+                    clean_id = re.sub(r"[^\d.]", "", str(val)).strip()
+                    if clean_id:
+                        try:
+                            cv = int(float(clean_s if (clean_s := clean_id) else 0))
+                        except ValueError:
+                            cv = str(val)
+                else:
+                    cv = None
             elif h in NUMERIC_COLS:
                 cv = parse_numeric(val)
             elif isinstance(val, dict) and "url" in val:
@@ -832,6 +746,8 @@ def _write_xlsx_rows(ws, rows, km, n, step, progress, fmt_link, fmt_date, fmt_cu
                     ws.write_url(excel_row, cidx, str(url), fmt_link, string=display)
                 except Exception:
                     ws.write(excel_row, cidx, display, fmt_link)
+            elif h in ("ID Noticia", "ID duplicada") and isinstance(cv, int):
+                ws.write_number(excel_row, cidx, cv, fmt_plain_id)
             elif h == "Fecha" and isinstance(cv, datetime.datetime):
                 ws.write_datetime(excel_row, cidx, cv, fmt_date)
             elif h == "Fecha" and isinstance(cv, datetime.date):
@@ -860,26 +776,16 @@ def _write_xlsx_rows(ws, rows, km, n, step, progress, fmt_link, fmt_date, fmt_cu
             )
 
 
+# ======================================
+# Proceso Principal
+# ======================================
 def process_dossier(
     file_obj,
     region_map,
     internet_map,
     progress: ProgressCb = None,
-    enrich_fn: Optional[Callable[[List[dict], ProgressCb], List[dict]]] = None,
-    ia_columns: Optional[List[str]] = None,
+    ai_config: Optional[dict] = None
 ) -> dict:
-    """
-    Pipeline completo: leer, normalizar, expandir menciones, duplicados y exportar.
-    `progress(pct, mensaje)` se invoca en cada etapa, incluyendo la exportación
-    que antes ocurría en silencio después de «Archivo estructurado con éxito».
-
-    `enrich_fn`, si se pasa, se ejecuta DESPUÉS de detectar duplicados y ANTES
-    de exportar. Recibe (rows, progress_cb) y debe devolver `rows` con las
-    columnas extra ya asignadas (ver analisis_ia.enrich_rows_with_ia). Si no
-    se pasa, el comportamiento es exactamente el mismo que antes.
-    `ia_columns` son los nombres de esas columnas extra para incluirlas en el
-    Excel de salida (ver IA_OUTPUT_COLUMNS).
-    """
     t0 = time.time()
     emit_progress(progress, 2, "Cargando archivo…")
     file_bytes = file_to_bytes(file_obj)
@@ -902,47 +808,56 @@ def process_dossier(
 
     emit_progress(progress, 62, "Detectando duplicados…")
     rows = detectar_duplicados_avanzado(rows_expanded, KEY_MAP)
-    for row in rows:
-        if row["is_duplicate"]:
-            row["Tono"] = "Duplicada"
-            row["Tema"] = "-"
-            row["Subtema"] = "-"
 
-    emit_progress(progress, 70, "✓ Archivo estructurado con éxito.")
+    # Orden de columnas: Ubicar Contexto analizado, Tono_IA, Tema_IA, Subtema_IA
+    # DESPUÉS de 'revalorización' y ANTES de 'resumen corto'
+    if ai_config and ai_config.get("enabled"):
+        emit_progress(progress, 70, "Iniciando análisis reputacional con IA…")
+        rows = enrich_rows_with_ai(
+            rows=rows,
+            km=KEY_MAP,
+            brand=ai_config["brand"],
+            aliases=ai_config.get("aliases", []),
+            api_key=ai_config["api_key"],
+            model=ai_config.get("model", "gpt-4.1-nano-2025-04-14"),
+            progress_callback=progress
+        )
+        rev_idx = BASE_OUTPUT_COLUMNS.index("revalorización")
+        ai_cols = ["Contexto analizado", "Tono_IA", "Tema_IA", "Subtema_IA"]
+        cols_to_export = BASE_OUTPUT_COLUMNS[:rev_idx + 1] + ai_cols + BASE_OUTPUT_COLUMNS[rev_idx + 1:]
+    else:
+        cols_to_export = list(BASE_OUTPUT_COLUMNS)
+
+    emit_progress(progress, 94, "✓ Estructuración finalizada. Generando archivo Excel…")
 
     unique_rows = sum(1 for r in rows if not r.get("is_duplicate"))
     total_rows = len(rows)
 
-    if enrich_fn:
-        def ia_progress(pct, msg):
-            overall = 70 + int(pct * 0.20)  # 70-90
-            emit_progress(progress, overall, msg)
-
-        emit_progress(progress, 71, "Analizando tono, tema y subtema con IA…")
-        rows = enrich_fn(rows, ia_progress)
-        export_start = 90
-    else:
-        export_start = 70
-
-    emit_progress(progress, export_start, "Generando archivo de resultado…")
-
     def export_progress(pct, msg):
-        overall = export_start + int(pct * (99 - export_start) / 100)
+        overall = 94 + int(pct * 0.06)
         emit_progress(progress, overall, msg)
 
-    output_data = generate_output_excel(rows, KEY_MAP, progress=export_progress, extra_columns=ia_columns)
+    output_data = generate_output_excel(rows, KEY_MAP, progress=export_progress, columns_to_use=cols_to_export)
     del rows, rows_expanded
     gc.collect()
     duration = time.time() - t0
-    emit_progress(progress, 100, "Limpieza completada")
-    logger.info(
-        "Pipeline terminado: %s filas (%s únicas, %s duplicadas) en %.2fs, salida %.1f KB",
-        total_rows, unique_rows, total_rows - unique_rows, duration, len(output_data) / 1024,
-    )
+    emit_progress(progress, 100, "Limpieza y análisis completados")
+
+    # Nombre del archivo con la primera marca buscada para orden
+    if ai_config and ai_config.get("brand"):
+        brand_raw = ai_config.get("brand", "")
+        clean_tag = re.sub(r"[^\w\s-]", "", unidecode(brand_raw)).strip()
+        brand_tag = re.sub(r"[-\s]+", "_", clean_tag)
+        filename_prefix = f"Dossier_{brand_tag}" if brand_tag else "Dossier_Limpio"
+    else:
+        filename_prefix = "Dossier_Limpio"
+
+    timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M')
+    final_filename = f"{filename_prefix}_{timestamp}.xlsx"
 
     return {
         "output_data": output_data,
-        "output_filename": f"Dossier_Limpio_{datetime.datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+        "output_filename": final_filename,
         "total_rows": total_rows,
         "unique_rows": unique_rows,
         "duplicates": total_rows - unique_rows,
