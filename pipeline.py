@@ -79,6 +79,8 @@ KEY_MAP = {
 THOUSANDS_COLS = {"Nro. Pagina", "Dimensión", "Duración - Nro. Caracteres", "Tier", "Audiencia"}
 CURRENCY_COLS = {"CPE", "revalorización"}
 NUMERIC_COLS = {"ID Noticia", "ID duplicada"} | THOUSANDS_COLS | CURRENCY_COLS
+# Display "Link" as black, non-underlined text while keeping the hyperlink.
+PLAIN_HYPERLINK_COLUMNS = frozenset({"Link Nota", "Link (Streaming - Imagen)"})
 
 REL_NS = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}"
 HYPERLINK_TAIL_BYTES = 4 * 1024 * 1024
@@ -670,6 +672,7 @@ def generate_output_excel(rows, km, progress: ProgressCb = None, columns_to_use:
     ws = wb.add_worksheet("Resultado")
     fmt_header = wb.add_format({"bold": True})
     fmt_link = wb.add_format({"font_color": "#0563C1", "underline": 1, "align": "left"})
+    fmt_plain_hlink = wb.add_format({"font_color": "#000000", "underline": False, "align": "left"})
     fmt_date = wb.add_format({"num_format": "DD/MM/YYYY"})
     fmt_currency = wb.add_format({"num_format": "$#,##0"})
     fmt_thousands = wb.add_format({"num_format": "#,##0"})
@@ -692,14 +695,17 @@ def generate_output_excel(rows, km, progress: ProgressCb = None, columns_to_use:
     emit_progress(progress, 0, f"Generando archivo de resultado… 0/{n} filas")
 
     try:
-        _write_xlsx_rows(ws, rows, km, n, step, progress, fmt_link, fmt_date, fmt_currency, fmt_thousands, fmt_plain_id, cols)
+        _write_xlsx_rows(
+            ws, rows, km, n, step, progress,
+            fmt_link, fmt_plain_hlink, fmt_date, fmt_currency, fmt_thousands, fmt_plain_id, cols,
+        )
         emit_progress(progress, 100, "Guardando archivo Excel…")
     finally:
         wb.close()
     return buf.getvalue()
 
 
-def _write_xlsx_rows(ws, rows, km, n, step, progress, fmt_link, fmt_date, fmt_currency, fmt_thousands, fmt_plain_id, cols):
+def _write_xlsx_rows(ws, rows, km, n, step, progress, fmt_link, fmt_plain_hlink, fmt_date, fmt_currency, fmt_thousands, fmt_plain_id, cols):
     for i, row in enumerate(rows):
         tk = km.get("titulo")
         if tk and tk in row:
@@ -747,10 +753,11 @@ def _write_xlsx_rows(ws, rows, km, n, step, progress, fmt_link, fmt_date, fmt_cu
 
             if url:
                 display = str(cv or "Link")
+                url_fmt = fmt_plain_hlink if h in PLAIN_HYPERLINK_COLUMNS else fmt_link
                 try:
-                    ws.write_url(excel_row, cidx, str(url), fmt_link, string=display)
+                    ws.write_url(excel_row, cidx, str(url), url_fmt, string=display)
                 except Exception:
-                    ws.write(excel_row, cidx, display, fmt_link)
+                    ws.write(excel_row, cidx, display, url_fmt)
             elif h in ("ID Noticia", "ID duplicada") and isinstance(cv, int):
                 ws.write_number(excel_row, cidx, cv, fmt_plain_id)
             elif h == "Fecha" and isinstance(cv, datetime.datetime):
