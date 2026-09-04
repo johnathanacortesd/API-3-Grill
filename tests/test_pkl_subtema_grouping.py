@@ -61,7 +61,30 @@ class SubtemaQualityWithTemaPklTests(unittest.TestCase):
         )
         self.assertTrue(sub)
         self.assertNotEqual(sub.strip().lower(), "entrevista")
+        self.assertFalse(sub.strip().lower().startswith("entrevista"))
         self.assertGreaterEqual(len(sub.split()), 4)
+
+    def test_ensure_rejects_two_word_leftover_and_tema_prefix(self):
+        sub = ensure_subtema_distinct_from_tema(
+            "Mención",
+            "Mención del rector",
+            "UdeA",
+            "Rector anuncia cupos",
+            "La universidad anunció diálogo con el rector sobre nuevas becas de posgrado en Cali.",
+        )
+        self.assertGreaterEqual(len(sub.split()), 4)
+        self.assertNotIn("mención", sub.lower())
+        self.assertNotIn("mencion", sub.lower())
+        self.assertNotEqual(sub.strip().lower(), "rector anuncia")
+
+    def test_ensure_does_not_use_title_scrap_when_context_exists(self):
+        title = "Gobierno presenta reforma tributaria en el Congreso"
+        ctx = "La universidad anunció diálogo con el rector sobre nuevas becas de posgrado."
+        sub = ensure_subtema_distinct_from_tema("Mención", "Mención", "UdeA", title, ctx)
+        self.assertGreaterEqual(len(sub.split()), 4)
+        self.assertNotEqual(sub.strip().lower(), "gobierno presenta reforma tributaria en el")
+        self.assertNotEqual(sub.strip().lower(), title.lower())
+        self.assertIn("becas", sub.lower())
 
     def test_tema_pkl_keeps_specific_llm_subtema_and_skips_llm_theme(self):
         rows = [

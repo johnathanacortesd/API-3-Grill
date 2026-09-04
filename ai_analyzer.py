@@ -21,6 +21,31 @@ FORBIDDEN_TRAILING_WORDS = {
     "hacia", "desde", "sin", "que", "se"
 }
 
+MIN_SUBTEMA_WORDS = 4
+MAX_SUBTEMA_WORDS = 6
+
+# Longest first so "mencion del" wins over "mencion de" (which also matches "mencion del…").
+FORBIDDEN_SUBTEMA_PREFIXES = [
+    "mencion de la", "mencion del", "mencion de", "mencion a", "mencion en",
+    "presencia de", "declaraciones de", "noticia sobre", "alusion a", "referencia a",
+    "entrevista con", "entrevista al", "entrevista a",
+]
+
+# PKL tema labels that must not leak into Subtema_IA.
+PKL_TEMA_BLEED_TOKENS = {
+    "mencion", "entrevista", "opinion", "columna", "editorial", "noticia",
+    "presencia", "alusion", "referencia", "declaraciones", "cobertura", "nota",
+}
+
+_LEAD_NARRATION_RE = re.compile(
+    r"^(?:(?:la|el|los|las)\s+)?"
+    r"(?:universidad|institucion|instituci[oó]n|clinica|cl[ií]nica|hospital|"
+    r"fundacion|fundaci[oó]n|entidad|empresa|colegio|marca)\s+"
+    r"(?:anunci[oó]|inaugur[oó]|present[oó]|inform[oó]|indic[oó]|dijo|"
+    r"declar[oó]|revel[oó]|confirm[oó]|destac[oó]|explic[oó]|lanzo|lanz[oó])\s+",
+    re.IGNORECASE,
+)
+
 STOPWORDS_ES = {
     "de", "del", "la", "el", "los", "las", "en", "para", "por", "con", "a", "al",
     "y", "o", "u", "e", "un", "una", "unos", "unas", "sobre", "tras", "este", "esta",
@@ -250,38 +275,192 @@ def check_exact_byline_rule(text: str, brand: str, aliases: List[str]) -> bool:
 
     return False
 
+def _tokenize_phrase_words(text: str) -> List[str]:
+    return re.findall(r"[A-Za-zÁÉÍÓÚáéíóúÑñÜü0-9]+", str(text or ""))
+
+
+def _strip_forbidden_subtema_prefixes(text: str) -> str:
+    res = (text or "").strip()
+    changed = True
+    while res and changed:
+        changed = False
+        res_norm = unidecode(res.lower())
+        for fs in FORBIDDEN_SUBTEMA_PREFIXES:
+            if re.match(rf"^{re.escape(fs)}\b", res_norm):
+                # Map prefix length on the normalized string back to original split.
+                prefix_n = len(fs.split())
+                words = res.split()
+                res = " ".join(words[prefix_n:]).strip()
+                changed = True
+                break
+    return res
+
+
+def _strip_tema_echo_prefix(text: str, tema: str) -> str:
+    if not text or not tema:
+        return text
+    words = text.split()
+    tema_words = _tokenize_phrase_words(tema)
+    if not tema_words or len(words) <= len(tema_words):
+        return text
+    n = len(tema_words)
+    head = unidecode(" ".join(words[:n]).lower())
+    tema_norm = unidecode(" ".join(tema_words).lower())
+    if head == tema_norm:
+        return " ".join(words[n:]).strip()
+    return text
+
+
+def _normalize_subtema_phrase(text: str, brand: str, tema: str = "") -> str:
+    if not text:
+        return ""
+    clean = re.sub(r'[,.;:!?¿¡"\'\(\)\[\]\{\}\-_/\\|]', " ", str(text))
+    words = [w for w in clean.split() if w]
+    if len(words) > MAX_SUBTEMA_WORDS:
+        words = words[:MAX_SUBTEMA_WORDS]
+    while words and words[-1].lower() in FORBIDDEN_TRAILING_WORDS:
+        words.pop()
+    res = _strip_forbidden_subtema_prefixes(" ".join(words).strip())
+    res = _strip_tema_echo_prefix(res, tema)
+    words = [w for w in res.split() if w]
+    while words and words[-1].lower() in FORBIDDEN_TRAILING_WORDS:
+        words.pop()
+    res = " ".join(words).strip()
+    if not res:
+        return ""
+    brand_words = set(re.findall(r"\b[a-z0-9]+\b", unidecode(brand.lower())))
+    res_words = set(re.findall(r"\b[a-z0-9]+\b", unidecode(res.lower())))
+    if res_words.issubset(brand_words):
+        return ""
+    if unidecode(res.lower()) in {
+        "universidad", "autonoma", "fundacion", "clinica", "hospital",
+        "institucion", "asociacion", "mencion", "entrevista", "noticia",
+    }:
+        return ""
+    return res.capitalize()
+
+
+def _content_token_set(text: str) -> Set[str]:
+    return {w for w in normalize_text_for_matching(text).split() if w}
+
+
+def _is_title_scrap(phrase: str, title: str) -> bool:
+    """True when the phrase is just the titular cropped to N words, not a distinct fact."""
+    if not phrase or not title:
+        return False
+    phrase_words = [unidecode(w.lower()) for w in phrase.split()]
+    title_words = [unidecode(w.lower()) for w in _tokenize_phrase_words(title)]
+    n = len(phrase_words)
+    if n < MIN_SUBTEMA_WORDS or len(title_words) < n:
+        return False
+    if phrase_words == title_words[:n]:
+        return True
+    # Same after dropping stopwords at the same lead position.
+    np = normalize_text_for_matching(phrase)
+    nt_lead = normalize_text_for_matching(" ".join(_tokenize_phrase_words(title)[:n]))
+    return bool(np) and np == nt_lead
+
+
+def _is_strong_subtema(phrase: str, tema: str, title: str, brand: str) -> bool:
+    if not phrase:
+        return False
+    words = phrase.split()
+    if len(words) < MIN_SUBTEMA_WORDS:
+        return False
+    if _labels_too_close(tema, phrase):
+        return False
+    frase_toks = _content_token_set(phrase)
+    tema_toks = _content_token_set(tema)
+    if tema_toks and frase_toks and len(frase_toks & tema_toks) / len(frase_toks) >= 0.55:
+        return False
+    bleed = {unidecode(t) for t in PKL_TEMA_BLEED_TOKENS}
+    if frase_toks and sum(1 for t in frase_toks if t in bleed) / len(frase_toks) >= 0.4:
+        return False
+    if unidecode(phrase.lower()) in {
+        "hecho informativo", "gestion institucional", "gestión institucional",
+    }:
+        return False
+    brand_words = set(re.findall(r"\b[a-z0-9]+\b", unidecode(brand.lower())))
+    if frase_toks and frase_toks.issubset(brand_words):
+        return False
+    if _is_title_scrap(phrase, title):
+        return False
+    return True
+
+
+def _score_subtema_window(words: List[str], tema: str, title: str, brand: str) -> int:
+    phrase = " ".join(words)
+    low = unidecode(phrase.lower())
+    if any(re.match(rf"^{re.escape(fs)}\b", low) for fs in FORBIDDEN_SUBTEMA_PREFIXES):
+        return -100
+    content = [
+        w for w in words
+        if unidecode(w.lower()) not in STOPWORDS_ES and len(unidecode(w.lower())) > 2
+    ]
+    if len(content) < 2:
+        return -60
+    if _labels_too_close(tema, phrase):
+        return -80
+    tema_toks = _content_token_set(tema)
+    phrase_toks = _content_token_set(phrase)
+    if tema_toks and phrase_toks and len(phrase_toks & tema_toks) / len(phrase_toks) >= 0.5:
+        return -45
+    bleed = {unidecode(t) for t in PKL_TEMA_BLEED_TOKENS}
+    bleed_n = sum(1 for t in phrase_toks if t in bleed)
+    title_pen = 30 if _is_title_scrap(phrase, title) else 0
+    noun_bonus = 0
+    for w in content:
+        wl = unidecode(w.lower())
+        if wl.endswith(("cion", "sion", "miento", "dad", "aje", "ncia", "encia", "ura", "azgo")):
+            noun_bonus += 8
+    start = unidecode(words[0].lower())
+    start_pen = -8 if start in STOPWORDS_ES else 6
+    brand_words = set(re.findall(r"\b[a-z0-9]+\b", unidecode(brand.lower())))
+    brand_pen = 20 if phrase_toks and phrase_toks.issubset(brand_words) else 0
+    return 12 * len(content) + noun_bonus + start_pen - title_pen - (12 * bleed_n) - brand_pen
+
+
+def _noun_phrase_from_context(ctx: str, tema: str, title: str, brand: str) -> str:
+    text = str(ctx or "").strip()
+    if not text or text == "-":
+        return ""
+    text = _LEAD_NARRATION_RE.sub("", text)
+    text = re.sub(
+        r"^(?:[A-ZÁÉÍÓÚÑ][\wÁÉÍÓÚáéíóúñü]+(?:\s+[A-ZÁÉÍÓÚÑ][\wÁÉÍÓÚáéíóúñü]+){0,5})\s+"
+        r"(?:anunci[oó]|inaugur[oó]|present[oó]|inform[oó]|dijo|declar[oó]|lanzo|lanz[oó])\s+",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
+    words = _tokenize_phrase_words(text)
+    if len(words) < MIN_SUBTEMA_WORDS:
+        return ""
+    best = ""
+    best_score = -1
+    for n in range(MAX_SUBTEMA_WORDS, MIN_SUBTEMA_WORDS - 1, -1):
+        for i in range(0, len(words) - n + 1):
+            window = words[i:i + n]
+            score = _score_subtema_window(window, tema, title, brand)
+            if score > best_score:
+                best_score = score
+                best = " ".join(window)
+    if best_score < 0 or not best:
+        return ""
+    return _normalize_subtema_phrase(best, brand, tema)
+
+
 def clean_subtema(text: str, brand: str, title_fallback: str) -> str:
     if not text:
         return _fallback_from_title(title_fallback)
-        
-    clean = re.sub(r'[,.;:!?¿¡"\'\(\)\[\]\{\}\-_/\\|]', ' ', str(text))
-    words = [w for w in clean.split() if w]
-    
-    if len(words) > 6:
-        words = words[:6]
-        
-    while words and words[-1].lower() in FORBIDDEN_TRAILING_WORDS:
-        words.pop()
-        
-    res = " ".join(words).strip()
-    res_lower = res.lower()
-    
-    forbidden_starts = [
-        "mencion de", "mencion a", "mencion en", "mencion del", "presencia de",
-        "declaraciones de", "noticia sobre", "alusion a", "referencia a"
-    ]
-    for fs in forbidden_starts:
-        if res_lower.startswith(fs):
-            res = res[len(fs):].strip()
-            break
-            
-    brand_words = set(re.findall(r"\b[a-z0-9]+\b", unidecode(brand.lower())))
-    res_words = set(re.findall(r"\b[a-z0-9]+\b", unidecode(res.lower())))
-    
-    if not res or res_words.issubset(brand_words) or res_lower in ["universidad", "autonoma", "fundacion", "clinica", "hospital", "institucion", "asociacion"]:
+    res = _normalize_subtema_phrase(text, brand)
+    if not res:
         return _fallback_from_title(title_fallback)
-        
-    return res.capitalize()
+    return res
+
+
+def clean_subtema_specific(text: str, brand: str, tema: str = "") -> str:
+    """PKL-tema path: never collapse to a title scrap or a 1–2 word leftover."""
+    return _normalize_subtema_phrase(text, brand, tema)
 
 def clean_tema(text: str) -> str:
     if not text:
@@ -478,15 +657,47 @@ def ensure_subtema_distinct_from_tema(
     title: str,
     ctx: str,
 ) -> str:
-    """Si el subtema colisiona con un tema PKL, reusa el mismo limpiado específico (no recorta calidad a título)."""
-    cleaned = clean_subtema(subtema or "", brand, title)
-    if cleaned and not _labels_too_close(tema, cleaned) and len(cleaned.split()) >= 2:
-        return cleaned
-    for candidate in (ctx, title):
-        alt = clean_subtema(str(candidate or ""), brand, title)
-        if alt and not _labels_too_close(tema, alt) and len(alt.split()) >= 2:
-            return alt
-    return cleaned or subtema or _fallback_from_title(title)
+    """Keep a specific 4–6 word noun phrase, distinct from the PKL tema. Prefer context over title scrap."""
+    ordered: List[str] = []
+
+    llm_clean = clean_subtema_specific(subtema or "", brand, tema)
+    if llm_clean:
+        ordered.append(llm_clean)
+
+    ctx_phrase = _noun_phrase_from_context(ctx, tema, title, brand)
+    if ctx_phrase:
+        ordered.append(ctx_phrase)
+
+    ctx_clean = clean_subtema_specific(str(ctx or ""), brand, tema)
+    if ctx_clean:
+        ordered.append(ctx_clean)
+
+    for candidate in ordered:
+        if _is_strong_subtema(candidate, tema, title, brand):
+            return candidate
+
+    for candidate in ordered:
+        words = candidate.split()
+        if (
+            len(words) >= MIN_SUBTEMA_WORDS
+            and not _labels_too_close(tema, candidate)
+            and not _is_title_scrap(candidate, title)
+        ):
+            return candidate
+
+    if ctx_phrase and not _labels_too_close(tema, ctx_phrase) and len(ctx_phrase.split()) >= MIN_SUBTEMA_WORDS:
+        return ctx_phrase
+
+    # Last resort: left-aligned 4–6 words from context, never a 2-word leftover or tema echo.
+    ctx_words = _tokenize_phrase_words(_LEAD_NARRATION_RE.sub("", str(ctx or "")))
+    if len(ctx_words) >= MIN_SUBTEMA_WORDS:
+        fallback = _normalize_subtema_phrase(
+            " ".join(ctx_words[:MAX_SUBTEMA_WORDS]), brand, tema
+        )
+        if fallback and not _labels_too_close(tema, fallback) and len(fallback.split()) >= MIN_SUBTEMA_WORDS:
+            return fallback
+
+    return llm_clean or ctx_phrase or "Hecho informativo institucional"
 
 
 def _call_openai_cluster(
@@ -524,9 +735,9 @@ def _call_openai_cluster(
         n += 1
 
     subtema_rule = (
-        f'{n}. "subtema": HECHO ESPECÍFICO (frase nominal coherente en español colombiano, '
-        "preferible 4 a 6 palabras. Sin comas ni puntos. "
-        'PROHIBIDO usar "Mención", collage de keywords o recortar el titular).'
+        f'{n}. "subtema": HECHO ESPECÍFICO: una sola frase nominal coherente en español colombiano, '
+        "de 4 a 6 palabras o más (no collage de keywords). Sin comas ni puntos. "
+        'PROHIBIDO usar "Mención", recortar el titular, o copiar el tema.'
     )
     steps.append(subtema_rule)
     json_fields.append('"subtema": "..."')
@@ -536,8 +747,12 @@ def _call_openai_cluster(
     elif pkl_theme:
         differ_rule = (
             f'TEMA YA CLASIFICADO POR EL MODELO DEL CLIENTE: "{pkl_theme}". '
-            "NO inventes otro tema ni lo copies como subtema. "
-            "El subtema debe ser un hecho más específico y distinto a ese tema."
+            "NO inventes otro tema. NO copies ese tema ni lo parafrasees como subtema "
+            '(MAL: tema "Entrevista" → subtema "Entrevista al rector"; '
+            'MAL: "Mención", "Mención del rector", collage "rector becas cali"). '
+            "El subtema debe ser una frase nominal concreta de 4 a 6+ palabras, "
+            "distinta al tema, extraída del hecho (BIEN: "
+            '"Diálogo del rector sobre becas de posgrado").'
         )
     else:
         differ_rule = "El subtema debe describir el hecho concreto, no un dominio general."
@@ -581,7 +796,7 @@ Responde estrictamente en JSON:
             ],
             response_format={"type": "json_object"},
             temperature=0.0,
-            max_tokens=140
+            max_tokens=180
         )
         data = json.loads(resp.choices[0].message.content)
 
@@ -593,7 +808,11 @@ Responde estrictamente en JSON:
         else:
             tono = "Neutro"
 
-        subtema = clean_subtema(data.get("subtema", ""), brand, title_ref)
+        raw_sub = data.get("subtema", "")
+        if pkl_theme and not request_theme:
+            subtema = clean_subtema_specific(raw_sub, brand, pkl_theme)
+        else:
+            subtema = clean_subtema(raw_sub, brand, title_ref)
 
         if request_theme:
             tema = clean_tema(data.get("tema", ""))
@@ -605,12 +824,12 @@ Responde estrictamente en JSON:
         return tono, tema, subtema
     except Exception as e:
         logger.error(f"Error en llamada OpenAI: {e}")
-        sub_fb = _fallback_from_title(title_ref)
         if request_theme:
+            sub_fb = _fallback_from_title(title_ref)
             tema_fb = ensure_different_tema_subtema("Gestión Institucional", sub_fb, ctx)
         else:
             tema_fb = (pkl_theme or "").strip() or "Gestión Institucional"
-            sub_fb = ensure_subtema_distinct_from_tema(tema_fb, sub_fb, brand, title_ref, ctx)
+            sub_fb = ensure_subtema_distinct_from_tema(tema_fb, "", brand, title_ref, ctx)
         tono_fb = "Positivo" if check_positive_institutional_override(ctx) else "Neutro"
         return tono_fb, tema_fb, sub_fb
 
@@ -742,12 +961,6 @@ def enrich_rows_with_ai(
 
         if theme_model is None:
             tema = ensure_different_tema_subtema(tema, subtema, row.get("Contexto analizado", ""))
-        else:
-            subtema = ensure_subtema_distinct_from_tema(
-                tema, subtema, brand,
-                str(row.get(km.get("titulo", "Título"), "")),
-                row.get("Contexto analizado", ""),
-            )
 
         row["Tono_IA"] = tono
         row["Tema_IA"] = tema
