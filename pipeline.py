@@ -21,6 +21,11 @@ from openpyxl.utils.cell import column_index_from_string, coordinate_from_string
 from unidecode import unidecode
 
 from ai_analyzer import enrich_rows_with_ai
+from pkl_classifier import (
+    apply_pkl_classifiers,
+    fill_classification_context,
+    load_sklearn_estimator,
+)
 
 logger = logging.getLogger("limpieza_grill")
 
@@ -777,6 +782,23 @@ def _write_xlsx_rows(ws, rows, km, n, step, progress, fmt_link, fmt_date, fmt_cu
 
 
 # ======================================
+# Modelos PKL opcionales
+# ======================================
+def _load_optional_pkl_models(ai_config: Optional[dict]):
+    if not ai_config:
+        return None, None
+    tone_model = None
+    theme_model = None
+    tone_bytes = ai_config.get("tone_pkl_bytes")
+    theme_bytes = ai_config.get("theme_pkl_bytes")
+    if tone_bytes:
+        tone_model, _ = load_sklearn_estimator(tone_bytes, "tono")
+    if theme_bytes:
+        theme_model, _ = load_sklearn_estimator(theme_bytes, "tema")
+    return tone_model, theme_model
+
+
+# ======================================
 # Proceso Principal
 # ======================================
 def process_dossier(
@@ -811,7 +833,11 @@ def process_dossier(
 
     # Orden de columnas: Ubicar Contexto analizado, Tono_IA, Tema_IA, Subtema_IA
     # DESPUÉS de 'revalorización' y ANTES de 'resumen corto'
-    if ai_config and ai_config.get("enabled"):
+    has_ai = bool(ai_config and ai_config.get("enabled"))
+    tone_model, theme_model = _load_optional_pkl_models(ai_config)
+    has_pkl = tone_model is not None or theme_model is not None
+
+    if has_ai:
         emit_progress(progress, 70, "Iniciando análisis reputacional con IA…")
         rows = enrich_rows_with_ai(
             rows=rows,
@@ -822,6 +848,26 @@ def process_dossier(
             model=ai_config.get("model", "gpt-4.1-nano-2025-04-14"),
             progress_callback=progress
         )
+    elif has_pkl:
+        emit_progress(progress, 70, "Preparando textos para clasificadores PKL…")
+        rows = fill_classification_context(
+            rows,
+            KEY_MAP,
+            brand=(ai_config or {}).get("brand", ""),
+            aliases=(ai_config or {}).get("aliases", []),
+        )
+
+    if has_pkl:
+        emit_progress(progress, 88, "Aplicando modelos PKL del cliente (tono/tema)…")
+        rows = apply_pkl_classifiers(
+            rows,
+            KEY_MAP,
+            tone_model=tone_model,
+            theme_model=theme_model,
+            progress_callback=progress,
+        )
+
+    if has_ai or has_pkl:
         rev_idx = BASE_OUTPUT_COLUMNS.index("revalorización")
         ai_cols = ["Contexto analizado", "Tono_IA", "Tema_IA", "Subtema_IA"]
         cols_to_export = BASE_OUTPUT_COLUMNS[:rev_idx + 1] + ai_cols + BASE_OUTPUT_COLUMNS[rev_idx + 1:]

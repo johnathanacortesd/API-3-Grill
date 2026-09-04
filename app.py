@@ -10,6 +10,7 @@ import streamlit as st
 import pandas as pd
 
 from pipeline import process_dossier
+from pkl_classifier import PklClassifierError, load_sklearn_estimator
 
 logger = logging.getLogger("limpieza_grill")
 if not logging.getLogger().handlers:
@@ -19,14 +20,10 @@ if not logging.getLogger().handlers:
     )
 
 # ======================================
-# CSS Personalizado
+# CSS Personalizado (claro / oscuro)
 # ======================================
-def load_custom_css():
-    st.markdown("""
-<style>
-@import url('https://fonts.googleapis.com/css2?family=Google+Sans:wght@400;500;700&family=Google+Sans+Text:wght@400;500;700&family=Roboto+Mono:wght@400;500&display=swap');
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap');
-:root {
+THEME_LIGHT_VARS = """
+:root,[data-testid="stApp"]{
     --bg:#f8f9fa;--s1:#ffffff;--s2:#f1f3f4;--s3:#e8eaed;
     --border:#dadce0;--border2:#bdc1c6;--border-focus:#f97316;
     --text:#202124;--text2:#3c4043;--text3:#5f6368;--text4:#9aa0a6;
@@ -34,12 +31,60 @@ def load_custom_css():
     --accent-bg:#fff7ed;--accent-bg2:#ffedd5;--accent-bdr:#fed7aa;
     --green:#059669;--green2:#047857;--green-bg:#ecfdf5;--green-bdr:#a7f3d0;
     --red:#dc2626;--amber:#d97706;--blue:#1a73e8;
+    --success-bg:linear-gradient(135deg,#ecfdf5,#d1fae5);
+    --success-title:#047857;
+    --icon-dossier-bg:#fff7ed;
     --r:8px;--r2:12px;--r3:16px;--r4:20px;
     --shadow-sm:0 1px 2px rgba(60,64,67,0.1),0 1px 3px rgba(60,64,67,0.08);
     --shadow-md:0 1px 3px rgba(60,64,67,0.12),0 4px 8px rgba(60,64,67,0.08);
     --shadow-lg:0 2px 6px rgba(60,64,67,0.1),0 8px 24px rgba(60,64,67,0.1);
     --transition:all 0.2s cubic-bezier(0.4,0,0.2,1);
 }
+"""
+
+THEME_DARK_VARS = """
+:root,[data-testid="stApp"]{
+    --bg:#121418;--s1:#1c1f26;--s2:#252830;--s3:#2e333c;
+    --border:#3d4450;--border2:#5c6370;--border-focus:#f97316;
+    --text:#e8eaed;--text2:#c5c8ce;--text3:#9aa0a6;--text4:#6e7480;
+    --accent:#f97316;--accent2:#fb923c;--accent3:#fdba74;
+    --accent-bg:#2a1c10;--accent-bg2:#3d2814;--accent-bdr:#9a5b28;
+    --green:#34d399;--green2:#6ee7b7;--green-bg:#0f291e;--green-bdr:#065f46;
+    --red:#f87171;--amber:#fbbf24;--blue:#60a5fa;
+    --success-bg:linear-gradient(135deg,#0f291e,#134e3a);
+    --success-title:#6ee7b7;
+    --icon-dossier-bg:#2a1c10;
+    --r:8px;--r2:12px;--r3:16px;--r4:20px;
+    --shadow-sm:0 1px 2px rgba(0,0,0,0.4),0 1px 3px rgba(0,0,0,0.25);
+    --shadow-md:0 1px 3px rgba(0,0,0,0.45),0 4px 8px rgba(0,0,0,0.3);
+    --shadow-lg:0 2px 6px rgba(0,0,0,0.4),0 8px 24px rgba(0,0,0,0.35);
+    --transition:all 0.2s cubic-bezier(0.4,0,0.2,1);
+}
+"""
+
+def _default_theme() -> str:
+    try:
+        theme_obj = getattr(getattr(st, "context", None), "theme", None)
+        theme_type = getattr(theme_obj, "type", None)
+        if theme_type in ("dark", "light"):
+            return theme_type
+    except Exception:
+        pass
+    return "light"
+
+def current_ui_theme() -> str:
+    theme = st.session_state.get("ui_theme")
+    if theme in ("dark", "light"):
+        return theme
+    return _default_theme()
+
+def load_custom_css():
+    theme_vars = THEME_DARK_VARS if current_ui_theme() == "dark" else THEME_LIGHT_VARS
+    st.markdown("""
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Google+Sans:wght@400;500;700&family=Google+Sans+Text:wght@400;500;700&family=Roboto+Mono:wght@400;500&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap');
+""" + theme_vars + """
 html,body,[data-testid="stApp"]{
     background:var(--bg)!important;color:var(--text)!important;
     font-family:'Google Sans Text','Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
@@ -72,7 +117,8 @@ html,body,[data-testid="stApp"]{
 .upload-zone-card{background:var(--s1);border:1.5px dashed var(--border);border-radius:var(--r2);padding:0.6rem 0.8rem;display:flex;align-items:center;gap:0.6rem;transition:var(--transition);}
 .upload-zone-card:hover{border-color:var(--accent);border-style:solid;transform:translateY(-1px);box-shadow:var(--shadow-md)}
 .upload-zone-icon{width:32px;height:32px;border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:1rem;flex-shrink:0;}
-.upload-zone-icon.uz-dossier{background:#fff7ed;color:#f97316}
+.upload-zone-icon.uz-dossier{background:var(--icon-dossier-bg);color:#f97316}
+.upload-zone-icon.uz-pkl{background:var(--accent-bg);color:var(--accent2)}
 .upload-zone-text{flex:1;min-width:0}
 .upload-zone-title{font-family:'Google Sans',sans-serif;font-size:0.82rem;font-weight:700;color:var(--text);line-height:1.2}
 .upload-zone-desc{font-size:0.7rem;color:var(--text3);line-height:1.3}
@@ -90,9 +136,9 @@ label[data-testid="stWidgetLabel"] p{font-family:'Google Sans',sans-serif!import
 .stButton>button:hover,[data-testid="stDownloadButton"]>button:hover{border-color:var(--accent)!important;color:var(--accent2)!important;background:var(--accent-bg)!important;box-shadow:var(--shadow-sm)!important;transform:translateY(-1px)!important;}
 .stButton>button[kind="primary"],[data-testid="stDownloadButton"]>button[kind="primary"]{background:var(--accent)!important;border:none!important;color:#fff!important;font-weight:500!important;font-size:0.92rem!important;padding:0.6rem 1.5rem!important;box-shadow:0 1px 3px rgba(249,115,22,0.3),0 4px 12px rgba(249,115,22,0.15)!important;letter-spacing:0.01em!important;}
 .stButton>button[kind="primary"]:hover,[data-testid="stDownloadButton"]>button[kind="primary"]:hover{background:var(--accent2)!important;box-shadow:0 2px 6px rgba(234,88,12,0.35),0 8px 24px rgba(234,88,12,0.18)!important;transform:translateY(-1px)!important;color:#fff!important;}
-.success-banner{background:linear-gradient(135deg,#ecfdf5,#d1fae5);border:1px solid var(--green-bdr);border-left:4px solid var(--green);border-radius:var(--r2);padding:0.8rem 1.2rem;margin:0.5rem 0 0.8rem;display:flex;align-items:center;gap:0.8rem;}
+.success-banner{background:var(--success-bg);border:1px solid var(--green-bdr);border-left:4px solid var(--green);border-radius:var(--r2);padding:0.8rem 1.2rem;margin:0.5rem 0 0.8rem;display:flex;align-items:center;gap:0.8rem;}
 .success-icon{width:34px;height:34px;background:linear-gradient(135deg,#059669,#047857);border-radius:50%;display:flex;align-items:center;justify-content:center;color:white;font-size:1rem;flex-shrink:0;}
-.success-title{font-family:'Google Sans',sans-serif;font-size:1rem;font-weight:700;color:#047857;margin-bottom:0.1rem}
+.success-title{font-family:'Google Sans',sans-serif;font-size:1rem;font-weight:700;color:var(--success-title);margin-bottom:0.1rem}
 .success-sub{font-size:0.8rem;color:var(--text2)}
 .auth-wrap{max-width:380px;margin:8vh auto 0;text-align:center}
 .auth-icon{width:60px;height:60px;background:linear-gradient(135deg,#f97316,#ea580c);border-radius:16px;display:inline-flex;align-items:center;justify-content:center;font-size:1.6rem;color:white;margin-bottom:1rem;box-shadow:0 4px 166px rgba(249,115,22,0.3);}
@@ -130,6 +176,13 @@ hr{border-color:var(--s3)!important;margin:0.5rem 0!important}
 .step-item.is-active .dot{border-color:var(--accent);background:var(--accent-bg);color:var(--accent2);animation:livePulse 1.4s ease-out infinite}
 .live-hint{background:var(--accent-bg);border:1px solid var(--accent-bdr);color:var(--accent3);border-radius:var(--r);padding:0.55rem 0.75rem;font-size:0.78rem;line-height:1.35}
 .live-detail{font-size:0.8rem;color:var(--text2);margin-top:0.45rem;font-family:'Google Sans Text',sans-serif}
+.theme-bar{display:flex;justify-content:flex-end;align-items:center;margin:0 0 0.6rem;gap:0.4rem}
+.theme-bar .stButton>button{padding:0.35rem 0.85rem!important;font-size:0.78rem!important}
+.pkl-hint{font-size:0.78rem;color:var(--text3);margin:0.15rem 0 0.55rem;line-height:1.35}
+div[data-testid="stAlert"]{border-radius:var(--r2)!important}
+[data-testid="stCheckbox"] p,[data-testid="stToggle"] p{color:var(--text2)!important}
+[data-baseweb="select"]>div,[data-baseweb="input"]{background:var(--s1)!important;color:var(--text)!important}
+.stMarkdown,.stCaption{color:var(--text2)}
 @media(max-width:768px){
     .metrics-grid{grid-template-columns:repeat(2,1fr)}
     .live-metrics{grid-template-columns:1fr 1fr 1fr}
@@ -137,6 +190,23 @@ hr{border-color:var(--s3)!important;margin:0.5rem 0!important}
 }
 </style>
 """, unsafe_allow_html=True)
+
+def _on_theme_toggle():
+    st.session_state["ui_theme"] = "dark" if st.session_state.get("theme_toggle") else "light"
+
+def render_theme_toggle():
+    if "ui_theme" not in st.session_state:
+        st.session_state["ui_theme"] = _default_theme()
+    if "theme_toggle" not in st.session_state:
+        st.session_state["theme_toggle"] = st.session_state["ui_theme"] == "dark"
+    _, col_theme = st.columns([6, 1])
+    with col_theme:
+        st.toggle(
+            "Modo oscuro",
+            key="theme_toggle",
+            on_change=_on_theme_toggle,
+            help="Cambia entre tema claro y oscuro. El naranja de marca se conserva.",
+        )
 
 # ======================================
 # Autenticación Básica
@@ -340,6 +410,7 @@ def main():
         initial_sidebar_state="collapsed"
     )
     load_custom_css()
+    render_theme_toggle()
     if not check_password(): return
 
     st.markdown("""
@@ -347,7 +418,7 @@ def main():
         <div class="app-header-icon">◈</div>
         <div class="app-header-text">
             <div class="app-header-title">Limpieza y Análisis de Noticias</div>
-            <div class="app-header-version">v3.0 · IA Enriquecida · Realizado por Johnathan Cortés</div>
+            <div class="app-header-version">v3.1 · IA Enriquecida · Realizado por Johnathan Cortés</div>
         </div>
         <div class="app-header-badge">Estructurador + IA</div>
     </div>""", unsafe_allow_html=True)
@@ -403,6 +474,39 @@ def main():
                     help="Variantes del nombre que deban atribuirse al cliente."
                 )
 
+            st.markdown('<div class="sec-label">3. Modelos PKL del cliente (opcional)</div>', unsafe_allow_html=True)
+            st.markdown(
+                '<div class="pkl-hint">Puedes subir el PKL de tono, el de tema, ambos o ninguno. '
+                "Si un eje no tiene PKL, se mantiene el análisis actual (IA). "
+                "El subtema nunca se reemplaza por PKL.</div>",
+                unsafe_allow_html=True,
+            )
+            st.markdown("""
+            <div class="upload-zone">
+                <div class="upload-zone-card">
+                    <div class="upload-zone-icon uz-pkl">◆</div>
+                    <div class="upload-zone-text">
+                        <div class="upload-zone-title">Clasificadores sklearn (joblib)</div>
+                        <div class="upload-zone-desc">Archivos .pkl con pipeline de texto (pasos tfidf + clf). No son obligatorios.</div>
+                    </div>
+                </div>
+            </div>""", unsafe_allow_html=True)
+            c_tono, c_tema = st.columns(2)
+            with c_tono:
+                f_tono = st.file_uploader(
+                    "PKL de tono",
+                    type=["pkl"],
+                    key="pkl_tono",
+                    help="Modelo opcional de scikit-learn para tono. Si no se sube, se usa la IA existente.",
+                )
+            with c_tema:
+                f_tema = st.file_uploader(
+                    "PKL de tema",
+                    type=["pkl"],
+                    key="pkl_tema",
+                    help="Modelo opcional de scikit-learn para tema. Si no se sube, se usa la IA existente.",
+                )
+
             if st.form_submit_button("▶ Iniciar Limpieza y Análisis", use_container_width=True, type="primary"):
                 if not f1:
                     st.error("Por favor, sube un archivo Excel.")
@@ -417,20 +521,35 @@ def main():
                     aliases_parsed = [
                         a.strip() for a in re.split(r"[,;]", alias_input) if a.strip()
                     ]
-                    
+                    tone_bytes = f_tono.getvalue() if f_tono else None
+                    theme_bytes = f_tema.getvalue() if f_tema else None
+                    try:
+                        if tone_bytes:
+                            load_sklearn_estimator(tone_bytes, "tono")
+                        if theme_bytes:
+                            load_sklearn_estimator(theme_bytes, "tema")
+                    except PklClassifierError as exc:
+                        st.error(str(exc))
+                        st.stop()
+
                     st.session_state["pending_dossier"] = f1.getvalue()
                     st.session_state["pending_meta"] = {
                         "name": f1.name,
                         "size": int(getattr(f1, "size", 0) or len(st.session_state["pending_dossier"])),
                     }
-                    st.session_state["pending_ai_config"] = {
-                        "enabled": enable_ai,
-                        "brand": brand_input.strip(),
-                        "aliases": aliases_parsed,
-                        "api_key": api_key,
-                        "model": "gpt-4.1-nano-2025-04-14"
-                    } if enable_ai else None
-                    
+                    if enable_ai or tone_bytes or theme_bytes:
+                        st.session_state["pending_ai_config"] = {
+                            "enabled": bool(enable_ai),
+                            "brand": brand_input.strip(),
+                            "aliases": aliases_parsed,
+                            "api_key": api_key if enable_ai else None,
+                            "model": "gpt-4.1-nano-2025-04-14",
+                            "tone_pkl_bytes": tone_bytes,
+                            "theme_pkl_bytes": theme_bytes,
+                        }
+                    else:
+                        st.session_state["pending_ai_config"] = None
+
                     st.rerun()
     else:
         total = st.session_state.total_rows
@@ -471,8 +590,11 @@ def main():
         )
         if c2.button("Nuevo análisis", use_container_width=True):
             pwd = st.session_state.get("password_correct")
+            theme = st.session_state.get("ui_theme")
             st.session_state.clear()
             st.session_state.password_correct = pwd
+            if theme in ("dark", "light"):
+                st.session_state.ui_theme = theme
             st.rerun()
 
     st.markdown(
