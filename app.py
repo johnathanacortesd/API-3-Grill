@@ -4,12 +4,12 @@
 import html
 import io
 import logging
+import re
 import time
 import streamlit as st
 import pandas as pd
 
-from pipeline import process_dossier, IA_OUTPUT_COLUMNS
-from analisis_ia import enrich_rows_with_ia
+from pipeline import process_dossier
 
 logger = logging.getLogger("limpieza_grill")
 if not logging.getLogger().handlers:
@@ -17,8 +17,6 @@ if not logging.getLogger().handlers:
         level=logging.INFO,
         format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
     )
-
-DEFAULT_IA_MODEL = "gpt-4.1-nano-2025-04-14"
 
 # ======================================
 # CSS Personalizado
@@ -36,7 +34,6 @@ def load_custom_css():
     --accent-bg:#fff7ed;--accent-bg2:#ffedd5;--accent-bdr:#fed7aa;
     --green:#059669;--green2:#047857;--green-bg:#ecfdf5;--green-bdr:#a7f3d0;
     --red:#dc2626;--amber:#d97706;--blue:#1a73e8;
-    --ia:#7c3aed;--ia2:#6d28d9;--ia3:#5b21b6;--ia-bg:#f5f3ff;--ia-bg2:#ede9fe;--ia-bdr:#ddd6fe;
     --r:8px;--r2:12px;--r3:16px;--r4:20px;
     --shadow-sm:0 1px 2px rgba(60,64,67,0.1),0 1px 3px rgba(60,64,67,0.08);
     --shadow-md:0 1px 3px rgba(60,64,67,0.12),0 4px 8px rgba(60,64,67,0.08);
@@ -138,31 +135,6 @@ hr{border-color:var(--s3)!important;margin:0.5rem 0!important}
     .live-metrics{grid-template-columns:1fr 1fr 1fr}
     .app-header{flex-direction:column;text-align:center;gap:0.5rem;padding:1rem}
 }
-
-/* ===== Bloque de Análisis con IA (tema morado, diferenciado del resto) ===== */
-.ia-card{
-    background:linear-gradient(180deg,var(--ia-bg) 0%,#ffffff 55%);
-    border:1.5px solid var(--ia-bdr);border-radius:var(--r3);
-    padding:1rem 1.2rem 1.1rem;margin:0.9rem 0 0.6rem;position:relative;overflow:hidden;
-    box-shadow:0 1px 3px rgba(124,58,237,0.08),0 4px 14px rgba(124,58,237,0.06);
-}
-.ia-card::before{content:'';position:absolute;top:0;left:0;right:0;height:3px;background:linear-gradient(90deg,#7c3aed,#a78bfa,#c4b5fd);}
-.ia-card-head{display:flex;align-items:center;gap:0.7rem;margin-bottom:0.6rem;flex-wrap:wrap;}
-.ia-card-icon{width:36px;height:36px;background:linear-gradient(135deg,#7c3aed,#6d28d9);border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:1.05rem;color:#fff;flex-shrink:0;box-shadow:0 2px 8px rgba(124,58,237,0.35);}
-.ia-card-title{font-family:'Google Sans',sans-serif;font-size:0.98rem;font-weight:700;color:var(--ia3);line-height:1.2}
-.ia-card-sub{font-size:0.76rem;color:var(--text3);margin-top:0.1rem}
-.ia-card-badge{margin-left:auto;background:var(--ia-bg2);border:1px solid var(--ia-bdr);color:var(--ia2);font-family:'Roboto Mono',monospace;font-size:0.6rem;font-weight:600;padding:0.22rem 0.65rem;border-radius:100px;letter-spacing:0.04em;text-transform:uppercase;white-space:nowrap;}
-.ia-card [data-testid="stCheckbox"]{background:#fff;border:1.5px solid var(--ia-bdr);border-radius:var(--r2);padding:0.6rem 0.85rem;margin-bottom:0.3rem;transition:var(--transition);}
-.ia-card [data-testid="stCheckbox"]:hover{border-color:var(--ia);box-shadow:0 0 0 3px rgba(124,58,237,0.1);}
-.ia-card [data-testid="stCheckbox"] label p{font-weight:600!important;color:var(--ia3)!important;font-size:0.88rem!important;}
-.ia-card [data-testid="stCheckbox"] svg{color:var(--ia)!important}
-.ia-card [data-testid="stWidgetLabel"] p{color:var(--ia3)!important}
-.ia-card [data-testid="stTextInput"] input{border-color:var(--ia-bdr)!important;}
-.ia-card [data-testid="stTextInput"] input:focus{border-color:var(--ia)!important;box-shadow:0 0 0 3px rgba(124,58,237,0.12)!important;}
-.ia-fields-wrap{background:#fff;border:1px solid var(--ia-bdr);border-radius:var(--r2);padding:0.7rem 0.8rem 0.2rem;margin-top:0.5rem;}
-.ia-hint{background:var(--ia-bg2);border:1px solid var(--ia-bdr);color:var(--ia3);border-radius:var(--r);padding:0.5rem 0.75rem;font-size:0.75rem;line-height:1.35;margin-top:0.5rem;}
-.step-item.is-active.ia-step .dot{border-color:var(--ia);background:var(--ia-bg);color:var(--ia2);}
-.step-item.is-active.ia-step{color:var(--ia2)!important}
 </style>
 """, unsafe_allow_html=True)
 
@@ -175,7 +147,7 @@ def check_password():
     st.markdown("""
     <div class="auth-wrap">
         <div class="auth-icon">◈</div>
-        <div class="auth-title">Sistema de Limpieza</div>
+        <div class="auth-title">Sistema de Limpieza y Análisis</div>
         <div class="auth-sub">Ingresa tus credenciales para continuar</div>
     </div>""", unsafe_allow_html=True)
     _, col, _ = st.columns([1, 2, 1])
@@ -191,54 +163,27 @@ def check_password():
     return False
 
 # ======================================
-# Configuración vía Google Sheets (CSV público)
+# Configuración vía Google Sheets
 # ======================================
-# En Google Sheets: Archivo > Compartir > Publicar en la web > eliges la hoja
-# "Regiones" (o "Internet") > formato CSV > copias la URL resultante y la
-# guardas en .streamlit/secrets.toml (o en la config de Secrets de Streamlit
-# Cloud) así:
-#
-# REGIONES_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-xxxx/pub?gid=0&single=true&output=csv"
-# INTERNET_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-xxxx/pub?gid=123456&single=true&output=csv"
-#
-# Cada hoja debe tener 2 columnas: la primera con el nombre del medio y la
-# segunda con el valor mapeado (región o nombre normalizado de internet).
-# No necesita encabezados especiales, solo mantener el mismo orden de columnas
-# que ya usa el archivo Configuracion.xlsx actual.
-#
-# Para el análisis con IA, agrega también en los Secrets:
-# OPENAI_API_KEY = "sk-...."
-# (opcional) OPENAI_MODEL = "gpt-4.1-nano-2025-04-14"
-
-CONFIG_CACHE_TTL = 300  # segundos; súbelo si tu Sheet cambia poco, bájalo si necesitas ver cambios casi al instante
+CONFIG_CACHE_TTL = 300
 
 @st.cache_data(ttl=CONFIG_CACHE_TTL, show_spinner=False)
 def _fetch_map_from_csv(csv_url: str) -> dict:
     df = pd.read_csv(csv_url, header=None, dtype=str)
-    # Si la primera fila parece encabezado (texto no vacío en ambas columnas
-    # pero repetido en filas siguientes), simplemente se ignora vía dropna.
     df = df.dropna(how="all")
     mapping = pd.Series(
         df.iloc[:, 1].values,
         index=df.iloc[:, 0].astype(str).str.lower().str.strip()
     ).to_dict()
-    # Limpiar posibles filas de encabezado tipo "medio"/"región"
     mapping = {k: v for k, v in mapping.items() if k not in ("nan", "")}
     return mapping
 
 def load_config_from_sheets():
-    """
-    Carga los mapeos de Región e Internet directamente desde Google Sheets.
-    Requiere REGIONES_CSV_URL e INTERNET_CSV_URL en st.secrets.
-    """
     regiones_url = st.secrets.get("REGIONES_CSV_URL")
     internet_url = st.secrets.get("INTERNET_CSV_URL")
 
     if not regiones_url or not internet_url:
-        st.error(
-            "❌ Faltan las URLs de configuración. Agrega REGIONES_CSV_URL e "
-            "INTERNET_CSV_URL en los Secrets de la app (ver comentario en el código)."
-        )
+        st.error("❌ Faltan REGIONES_CSV_URL e INTERNET_CSV_URL en st.secrets.")
         st.stop()
 
     try:
@@ -251,7 +196,6 @@ def load_config_from_sheets():
     return region_map, internet_map
 
 def refresh_config_cache():
-    """Limpia la cache para forzar una relectura inmediata del Sheets."""
     _fetch_map_from_csv.clear()
 
 # ======================================
@@ -262,10 +206,9 @@ PIPELINE_STEPS = [
     ("read", "Leer el Excel"),
     ("norm", "Limpiar y normalizar"),
     ("dups", "Menciones y duplicadas"),
-    ("ia", "Analizar Tono/Tema/Subtema (IA)"),
+    ("ai", "Análisis IA (Tono, Tema, Subtema)"),
     ("export", "Generar archivo de resultado"),
 ]
-
 
 def _fmt_elapsed(seconds: float) -> str:
     seconds = max(0, int(seconds))
@@ -273,38 +216,31 @@ def _fmt_elapsed(seconds: float) -> str:
         return f"{seconds} s"
     return f"{seconds // 60} min {seconds % 60:02d} s"
 
-
 def _fmt_size(n_bytes: int) -> str:
-    if not n_bytes:
-        return ""
+    if not n_bytes: return ""
     mb = n_bytes / (1024 * 1024)
-    if mb < 0.1:
-        return f"{n_bytes / 1024:.0f} KB"
+    if mb < 0.1: return f"{n_bytes / 1024:.0f} KB"
     return f"{mb:.1f} MB"
 
-
-def _active_step(pct: int, msg: str, ia_enabled: bool) -> str:
-    msg_low = (msg or "").lower()
-    if pct >= 100 or "limpieza completada" in msg_low:
+def _active_step(pct: int, msg: str) -> str:
+    if pct >= 100 or "completad" in msg.lower():
         return "done"
-    if "generando archivo" in msg_low or "guardando" in msg_low:
+    if pct >= 94 or "Generando archivo" in msg or "Guardando" in msg:
         return "export"
-    if ia_enabled and ("ia" in msg_low or "subtema" in msg_low or "tono" in msg_low or "tema" in msg_low):
-        return "ia"
-    if "duplicad" in msg_low or "expandiendo" in msg_low:
+    if pct >= 70 or "IA" in msg or "Analizando" in msg or "semántica" in msg:
+        return "ai"
+    if pct >= 55 or "duplicad" in msg.lower() or "Expandiendo" in msg:
         return "dups"
-    if "normaliz" in msg_low or "columnas" in msg_low:
+    if pct >= 40 or "Normaliz" in msg or "Columnas" in msg:
         return "norm"
-    if pct >= 8 or "excel" in msg_low or "leyendo" in msg_low or "hipervínculo" in msg_low:
+    if pct >= 8 or "Excel" in msg or "Leyendo" in msg:
         return "read"
     return "config"
 
-
-def _render_live_html(pct, msg, elapsed, file_label, active_key, ia_enabled):
-    steps = [s for s in PIPELINE_STEPS if ia_enabled or s[0] != "ia"]
+def _render_live_html(pct, msg, elapsed, file_label, active_key):
     steps_html = []
     reached_active = False
-    for key, label in steps:
+    for key, label in PIPELINE_STEPS:
         if active_key == "done":
             cls, mark = "is-done", "✓"
         elif key == active_key:
@@ -314,20 +250,12 @@ def _render_live_html(pct, msg, elapsed, file_label, active_key, ia_enabled):
             cls, mark = "is-done", "✓"
         else:
             cls, mark = "", ""
-        if key == "ia" and cls == "is-active":
-            cls += " ia-step"
-        steps_html.append(
-            f'<div class="step-item {cls}"><span class="dot">{mark}</span>{label}</div>'
-        )
+        steps_html.append(f'<div class="step-item {cls}"><span class="dot">{mark}</span>{label}</div>')
+        
     file_line = f" · {html.escape(file_label)}" if file_label else ""
-    title = "Procesando dossier"
-    if active_key == "done":
-        title = "Limpieza completada"
-    elif active_key == "export":
-        title = "Generando el archivo de resultado"
-    elif active_key == "ia":
-        title = "Analizando Tono, Tema y Subtema con IA"
+    title = "Limpieza completada" if active_key == "done" else "Procesando dossier de noticias"
     safe_msg = html.escape(str(msg or ""))
+    
     return f"""
     <div class="live-panel">
       <div class="live-head">
@@ -339,89 +267,61 @@ def _render_live_html(pct, msg, elapsed, file_label, active_key, ia_enabled):
       </div>
       <div class="live-metrics">
         <div class="live-metric"><div class="live-metric-val">{int(pct)}%</div><div class="live-metric-lbl">Avance</div></div>
-        <div class="live-metric"><div class="live-metric-val">{elapsed}</div><div class="live-metric-lbl">Tiempo transcurrido</div></div>
+        <div class="live-metric"><div class="live-metric-val">{elapsed}</div><div class="live-metric-lbl">Tiempo</div></div>
         <div class="live-metric"><div class="live-metric-val">en curso</div><div class="live-metric-lbl">Estado</div></div>
       </div>
       <div class="step-list">{''.join(steps_html)}</div>
-      <div class="live-hint">No está congelado. En archivos grandes (~17 MB) la barra se mueve despacio durante la lectura, el análisis con IA y al generar el xlsx de salida.</div>
+      <div class="live-hint">La deduplicación previa agrupa notas idénticas para procesar hasta 2.000 filas con alta velocidad.</div>
       <div class="live-detail">{safe_msg}</div>
     </div>
     """
 
-
-def run_cleaning_process(df_file, file_meta=None, ia_config=None):
-    """Ejecuta el pipeline y muestra avance continuo (incluye IA y la exportación)."""
+def run_cleaning_process(df_file, file_meta=None, ai_config=None):
     file_meta = file_meta or {}
-    ia_config = ia_config or {}
-    ia_enabled = bool(ia_config.get("habilitar"))
-
     file_label = file_meta.get("name", "")
     size_lbl = _fmt_size(file_meta.get("size") or 0)
     if file_label and size_lbl:
         file_label = f"{file_label} ({size_lbl})"
-    elif size_lbl:
-        file_label = size_lbl
 
     t_start = time.time()
     panel = st.empty()
     progress_bar = st.progress(0, text="Iniciando…")
-    result = None
-    ia_stats = {}
 
     def paint(pct, msg):
         elapsed = _fmt_elapsed(time.time() - t_start)
-        active = _active_step(pct, msg, ia_enabled)
-        panel.markdown(
-            _render_live_html(pct, msg, elapsed, file_label, active, ia_enabled),
-            unsafe_allow_html=True,
-        )
+        active = _active_step(pct, msg)
+        panel.markdown(_render_live_html(pct, msg, elapsed, file_label, active), unsafe_allow_html=True)
         progress_bar.progress(min(100, max(0, int(pct))), text=msg)
 
     paint(1, "Cargando configuración…")
 
-    def ia_enrich(rows, ia_progress_cb):
-        return enrich_rows_with_ia(
-            rows,
-            marca=ia_config.get("marca", ""),
-            alias_text=ia_config.get("alias", ""),
-            api_key=ia_config.get("api_key", ""),
-            model=ia_config.get("model", DEFAULT_IA_MODEL),
-            progress=ia_progress_cb,
-            stats_out=ia_stats,
-        )
-
-    with st.status("Procesando — el indicador de arriba se actualiza en cada paso", expanded=True) as status_widget:
+    with st.status("Procesando dossier…", expanded=True) as status_widget:
         def on_progress(pct, msg):
             paint(pct, msg)
             status_widget.update(label=f"{int(pct)}% · {msg}")
-            if "Archivo estructurado con éxito" in msg:
-                status_widget.update(label="✓ Archivo estructurado con éxito · continuando…")
 
         try:
-            st.write("Si este texto cambia y el porcentaje sube, el proceso no está congelado.")
             region_map, internet_map = load_config_from_sheets()
             result = process_dossier(
                 df_file,
                 region_map,
                 internet_map,
                 progress=on_progress,
-                enrich_fn=ia_enrich if ia_enabled else None,
-                ia_columns=IA_OUTPUT_COLUMNS if ia_enabled else None,
+                ai_config=ai_config
             )
             paint(100, "Limpieza completada")
-            status_widget.update(label="✓ Limpieza completada", state="complete")
+            status_widget.update(label="✓ Limpieza completada con éxito", state="complete")
             time.sleep(0.4)
         except Exception as exc:
             logger.exception("Fallo en el proceso de limpieza")
             status_widget.update(label="Error durante el procesamiento", state="error")
-            st.error(f"El proceso se interrumpió al leer, limpiar o generar el resultado: {exc}")
+            st.error(f"El proceso se interrumpió: {exc}")
             raise
 
     st.session_state["medios_sin_mapear"] = result.get("medios_sin_mapear") or None
     st.session_state["output_data"] = result["output_data"]
     st.session_state["output_filename"] = result["output_filename"]
     st.session_state["processing_complete"] = True
-    st.session_state["ia_stats"] = ia_stats if ia_enabled else None
     st.session_state.update({
         "total_rows": result["total_rows"],
         "unique_rows": result["unique_rows"],
@@ -434,7 +334,7 @@ def run_cleaning_process(df_file, file_meta=None, ia_config=None):
 # ======================================
 def main():
     st.set_page_config(
-        page_title="Limpieza de Noticias · Realizado por Johnathan Cortés",
+        page_title="Limpieza y Análisis de Noticias",
         page_icon="◈",
         layout="wide",
         initial_sidebar_state="collapsed"
@@ -446,8 +346,8 @@ def main():
     <div class="app-header">
         <div class="app-header-icon">◈</div>
         <div class="app-header-text">
-            <div class="app-header-title">Limpieza de Xlsx Grill</div>
-            <div class="app-header-version">v2.9 · Realizado por Johnathan Cortés</div>
+            <div class="app-header-title">Limpieza y Análisis de Noticias</div>
+            <div class="app-header-version">v3.0 · IA Enriquecida · Realizado por Johnathan Cortés</div>
         </div>
         <div class="app-header-badge">Estructurador + IA</div>
     </div>""", unsafe_allow_html=True)
@@ -455,8 +355,8 @@ def main():
     if st.session_state.get("pending_dossier"):
         blob = st.session_state.pop("pending_dossier")
         meta = st.session_state.pop("pending_meta", {}) or {}
-        ia_config = st.session_state.pop("pending_ia_config", {}) or {}
-        run_cleaning_process(io.BytesIO(blob), meta, ia_config)
+        ai_cfg = st.session_state.pop("pending_ai_config", None)
+        run_cleaning_process(io.BytesIO(blob), meta, ai_config=ai_cfg)
         st.rerun()
 
     if not st.session_state.get("processing_complete", False):
@@ -472,101 +372,86 @@ def main():
                 st.success("Config recargada")
 
         with st.form("main_form"):
-            st.markdown('<div class="sec-label">Sube el archivo de entrada</div>', unsafe_allow_html=True)
+            st.markdown('<div class="sec-label">1. Sube el archivo de entrada</div>', unsafe_allow_html=True)
             st.markdown("""
             <div class="upload-zone">
                 <div class="upload-zone-card">
                     <div class="upload-zone-icon uz-dossier">📋</div>
                     <div class="upload-zone-text">
                         <div class="upload-zone-title">Dossier de Noticias</div>
-                        <div class="upload-zone-desc">Sube el .xlsx. En archivos grandes (~17 MB) verás porcentaje, pasos y tiempo: no está congelado.</div>
+                        <div class="upload-zone-desc">Sube el .xlsx con las columnas Título y Resumen - Aclaracion.</div>
                     </div>
                 </div>
             </div>""", unsafe_allow_html=True)
-
+            
             f1 = st.file_uploader("Dossier", type=["xlsx"], label_visibility="collapsed", key="f1")
 
-            st.markdown("""
-            <div class="ia-card">
-                <div class="ia-card-head">
-                    <div class="ia-card-icon">✦</div>
-                    <div>
-                        <div class="ia-card-title">Análisis de Tono, Tema y Subtema con IA</div>
-                        <div class="ia-card-sub">Opcional · usa gpt-4.1-nano enfocado en tu marca</div>
-                    </div>
-                    <div class="ia-card-badge">Nuevo</div>
-                </div>
-            """, unsafe_allow_html=True)
-
-            habilitar_ia = st.checkbox(
-                "✓ Activar análisis con IA para este dossier",
-                value=False,
-                help="Agrega al final del Excel las columnas Tono_IA, Tema_IA y Subtema_IA, "
-                     "enfocadas en cómo aparece la marca/alias dentro de cada noticia.",
-            )
-
-            st.markdown('<div class="ia-fields-wrap">', unsafe_allow_html=True)
-            col_m1, col_m2 = st.columns(2)
-            with col_m1:
-                marca = st.text_input("Marca principal", placeholder="Ej: Universidad X")
-            with col_m2:
-                alias = st.text_input(
-                    "Alias (separados por coma)",
-                    placeholder="Ej: UX, Universidad de X, La Universidad",
+            st.markdown('<div class="sec-label">2. Configuración de Análisis IA (Tono, Tema, Subtema)</div>', unsafe_allow_html=True)
+            enable_ai = st.checkbox("Activar análisis reputacional con IA (gpt-4.1-nano-2025-04-14)", value=True)
+            
+            c_brand, c_alias = st.columns(2)
+            with c_brand:
+                brand_input = st.text_input(
+                    "Marca o Cliente Principal*",
+                    placeholder="Ej: Universidad de Antioquia, Ecopetrol, Bancolombia",
+                    help="La IA evaluará el sentimiento respecto a esta marca."
                 )
-            st.markdown("</div>", unsafe_allow_html=True)
+            with c_alias:
+                alias_input = st.text_input(
+                    "Alias o términos relacionados (separados por coma o punto y coma)",
+                    placeholder="Ej: UdeA; Alma Mater; rectoría; la universidad",
+                    help="Variantes del nombre que deban atribuirse al cliente."
+                )
 
-            st.markdown(
-                '<div class="ia-hint">Marca la casilla ✓ de arriba y escribe al menos la Marca principal '
-                'para que el análisis se ejecute. Necesitas OPENAI_API_KEY configurada en los Secrets.</div>',
-                unsafe_allow_html=True,
-            )
-            st.markdown("</div>", unsafe_allow_html=True)
-
-            if st.form_submit_button("▶ Iniciar Limpieza", use_container_width=True, type="primary"):
+            if st.form_submit_button("▶ Iniciar Limpieza y Análisis", use_container_width=True, type="primary"):
                 if not f1:
                     st.error("Por favor, sube un archivo Excel.")
-                elif habilitar_ia and not marca.strip():
-                    st.error("Para activar el análisis con IA, escribe la Marca principal.")
-                elif habilitar_ia and not st.secrets.get("OPENAI_API_KEY"):
-                    st.error("Falta OPENAI_API_KEY en los Secrets de la app para poder usar el análisis con IA.")
+                elif enable_ai and not brand_input.strip():
+                    st.error("Por favor indica la Marca o Cliente Principal para realizar el análisis enfocado.")
                 else:
-                    # Procesar fuera del form para que la barra de progreso
-                    # y el status se actualicen durante el análisis IA y la exportación.
+                    api_key = st.secrets.get("OPENAI_API_KEY")
+                    if enable_ai and not api_key:
+                        st.error("❌ Falta configurar OPENAI_API_KEY en los Secrets de Streamlit.")
+                        st.stop()
+                    
+                    aliases_parsed = [
+                        a.strip() for a in re.split(r"[,;]", alias_input) if a.strip()
+                    ]
+                    
                     st.session_state["pending_dossier"] = f1.getvalue()
                     st.session_state["pending_meta"] = {
                         "name": f1.name,
                         "size": int(getattr(f1, "size", 0) or len(st.session_state["pending_dossier"])),
                     }
-                    st.session_state["pending_ia_config"] = {
-                        "habilitar": habilitar_ia,
-                        "marca": marca.strip(),
-                        "alias": alias.strip(),
-                        "api_key": st.secrets.get("OPENAI_API_KEY", ""),
-                        "model": st.secrets.get("OPENAI_MODEL", DEFAULT_IA_MODEL),
-                    }
+                    st.session_state["pending_ai_config"] = {
+                        "enabled": enable_ai,
+                        "brand": brand_input.strip(),
+                        "aliases": aliases_parsed,
+                        "api_key": api_key,
+                        "model": "gpt-4.1-nano-2025-04-14"
+                    } if enable_ai else None
+                    
                     st.rerun()
     else:
         total = st.session_state.total_rows
         uniq  = st.session_state.unique_rows
         dups  = st.session_state.duplicates
         dur   = st.session_state.process_duration
-
+        
         st.markdown(
             '<div class="success-banner"><div class="success-icon">✓</div>'
-            '<div><div class="success-title">Limpieza completada</div>'
-            '<div class="success-sub">El archivo estructurado se encuentra listo para descargar</div></div></div>',
+            '<div><div class="success-title">Proceso completado</div>'
+            '<div class="success-sub">El archivo estructurado y analizado con IA se encuentra listo para descargar</div></div></div>',
             unsafe_allow_html=True
         )
 
         medios_sin_mapear = st.session_state.get("medios_sin_mapear")
         if medios_sin_mapear:
             st.warning(
-                "⚠️ Los siguientes medios no tienen región asignada en el Sheets de "
-                f"'Regiones' (quedaron como N/A): {', '.join(medios_sin_mapear)}. "
-                "Agrégalos en el Google Sheets para que se mapeen automáticamente la próxima vez."
+                "⚠️ Medios sin región asignada en Sheets (quedaron N/A): "
+                f"{', '.join(medios_sin_mapear)}."
             )
-
+        
         st.markdown(f"""
         <div class="metrics-grid">
           <div class="metric-card m-total"><div class="metric-val" style="color:var(--text)">{total}</div><div class="metric-lbl">Total Registros</div></div>
@@ -574,34 +459,10 @@ def main():
           <div class="metric-card m-dup"><div class="metric-val" style="color:var(--amber)">{dups}</div><div class="metric-lbl">Duplicados</div></div>
           <div class="metric-card m-time"><div class="metric-val" style="color:var(--blue)">{dur}</div><div class="metric-lbl">Tiempo de Ejecución</div></div>
         </div>""", unsafe_allow_html=True)
-
-        ia_stats = st.session_state.get("ia_stats")
-        if ia_stats:
-            with st.expander("📊 Resumen del análisis con IA (Tono / Tema / Subtema)", expanded=True):
-                c1, c2, c3 = st.columns(3)
-                c1.metric("Grupos de noticias analizados", ia_stats.get("grupos_analizados", 0))
-                c2.metric("Subtemas únicos", ia_stats.get("subtemas_unicos", 0))
-                c3.metric("Temas únicos", ia_stats.get("temas_unicos", 0))
-
-                por_tono = ia_stats.get("por_tono") or {}
-                por_tema = ia_stats.get("por_tema") or {}
-                cc1, cc2 = st.columns(2)
-                if por_tono:
-                    cc1.write("**Por Tono**")
-                    cc1.dataframe(
-                        pd.DataFrame(sorted(por_tono.items(), key=lambda x: -x[1]), columns=["Tono", "Noticias"]),
-                        hide_index=True, use_container_width=True,
-                    )
-                if por_tema:
-                    cc2.write("**Por Tema**")
-                    cc2.dataframe(
-                        pd.DataFrame(sorted(por_tema.items(), key=lambda x: -x[1]), columns=["Tema", "Noticias"]),
-                        hide_index=True, use_container_width=True,
-                    )
-
+        
         c1, c2 = st.columns(2)
         c1.download_button(
-            "⬇ Descargar Xlsx Limpio",
+            "⬇ Descargar Xlsx Estructurado con IA",
             data=st.session_state.output_data,
             file_name=st.session_state.output_filename,
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
