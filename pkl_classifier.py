@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Optional, Sequence
 import joblib
 import numpy as np
 
-from ai_analyzer import extract_brand_context, generate_brand_variants
+from ai_analyzer import cluster_similar_rows, extract_brand_context, generate_brand_variants
 
 logger = logging.getLogger("pkl_classifier")
 
@@ -212,13 +212,18 @@ def apply_pkl_classifiers(
     tone_model=None,
     theme_model=None,
     progress_callback=None,
+    brand: str = "",
+    aliases: Optional[Sequence[str]] = None,
+    unify_similar: bool = True,
 ) -> List[dict]:
-    """Sobrescribe Tono_IA y/o Tema_IA. Nunca toca Subtema_IA. Omite duplicadas."""
+    """Sobrescribe Tono_IA y/o Tema_IA. Nunca toca Subtema_IA. Omite duplicadas.
+
+    Por defecto unifica noticias similares (mismo clúster que el flujo IA) para
+    que compartan tono/tema y no se rompa el agrupamiento.
+    """
     if not tone_model and not theme_model:
         return rows
 
-    indices: List[int] = []
-    texts: List[str] = []
     for i, row in enumerate(rows):
         if row.get("is_duplicate"):
             row.setdefault("Tono_IA", "Duplicada")
@@ -226,31 +231,50 @@ def apply_pkl_classifiers(
             row.setdefault("Subtema_IA", "-")
             row.setdefault("Contexto analizado", "-")
             continue
-        text = text_for_classification(row, km)
         if not row.get("Contexto analizado"):
-            row["Contexto analizado"] = text or "-"
+            row["Contexto analizado"] = text_for_classification(row, km) or "-"
         row.setdefault("Subtema_IA", "-")
         row.setdefault("Tono_IA", "-")
         row.setdefault("Tema_IA", "-")
-        indices.append(i)
-        texts.append(text or "")
 
-    if not indices:
+    active = [i for i, row in enumerate(rows) if not row.get("is_duplicate")]
+    if not active:
         return rows
+
+    if unify_similar:
+        regexes = generate_brand_variants(brand, list(aliases or [])) if brand else []
+        cluster_map = cluster_similar_rows(rows, km, regexes)
+    else:
+        cluster_map = {i: i for i in active}
+
+    members: Dict[int, List[int]] = {}
+    reps: Dict[int, int] = {}
+    for i in active:
+        cid = cluster_map.get(i, i)
+        members.setdefault(cid, []).append(i)
+        if cid not in reps:
+            reps[cid] = i
+
+    ordered_cids = list(reps.keys())
+    rep_texts = [text_for_classification(rows[reps[cid]], km) or "" for cid in ordered_cids]
 
     if tone_model is not None:
         if progress_callback:
             progress_callback(min(93, 88), "Clasificando tono con modelo PKL del cliente…")
-        preds = _safe_predict(tone_model, texts, "tono")
-        for idx, pred in zip(indices, preds):
-            rows[idx]["Tono_IA"] = map_tone_label(pred)
+        preds = _safe_predict(tone_model, rep_texts, "tono")
+        for cid, pred in zip(ordered_cids, preds):
+            label = map_tone_label(pred)
+            for idx in members[cid]:
+                rows[idx]["Tono_IA"] = label
 
     if theme_model is not None:
         if progress_callback:
             progress_callback(min(93, 90), "Clasificando tema con modelo PKL del cliente…")
-        preds = _safe_predict(theme_model, texts, "tema")
-        for idx, pred in zip(indices, preds):
-            rows[idx]["Tema_IA"] = format_theme_label(pred) or rows[idx].get("Tema_IA") or "-"
+        preds = _safe_predict(theme_model, rep_texts, "tema")
+        for cid, pred in zip(ordered_cids, preds):
+            label = format_theme_label(pred) or rows[reps[cid]].get("Tema_IA") or "-"
+            for idx in members[cid]:
+                rows[idx]["Tema_IA"] = label
 
     return rows
 
