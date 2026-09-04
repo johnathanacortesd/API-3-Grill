@@ -459,6 +459,36 @@ def canonicalize_subtopics(cluster_results: Dict[int, Tuple[str, str, str]]) -> 
         
     return final_results
 
+def _labels_too_close(a: str, b: str) -> bool:
+    if not a or not b:
+        return False
+    na = normalize_text_for_matching(a)
+    nb = normalize_text_for_matching(b)
+    if not na or not nb:
+        return False
+    if na == nb or na in nb or nb in na:
+        return True
+    return fuzz.ratio(na, nb) >= 80 or fuzz.token_set_ratio(na, nb) >= 85
+
+
+def ensure_subtema_distinct_from_tema(
+    tema: str,
+    subtema: str,
+    brand: str,
+    title: str,
+    ctx: str,
+) -> str:
+    """Si el subtema colisiona con un tema PKL, reusa el mismo limpiado específico (no recorta calidad a título)."""
+    cleaned = clean_subtema(subtema or "", brand, title)
+    if cleaned and not _labels_too_close(tema, cleaned) and len(cleaned.split()) >= 2:
+        return cleaned
+    for candidate in (ctx, title):
+        alt = clean_subtema(str(candidate or ""), brand, title)
+        if alt and not _labels_too_close(tema, alt) and len(alt.split()) >= 2:
+            return alt
+    return cleaned or subtema or _fallback_from_title(title)
+
+
 def _call_openai_cluster(
     client: OpenAI,
     model: str,
@@ -466,19 +496,55 @@ def _call_openai_cluster(
     aliases: List[str],
     brand_regexes: List[str],
     ctx: str,
-    title_ref: str
+    title_ref: str,
+    request_tone: bool = True,
+    request_theme: bool = True,
+    pkl_theme: Optional[str] = None,
 ) -> Tuple[str, str, str]:
     # REGLA EXACTA DE AUTORÍA/EGRESADOS (SI ESTÁN LAS PALABRAS NO SE ANALIZA CON IA)
     search_scope = f"{title_ref} {ctx}"
     if check_exact_byline_rule(search_scope, brand, aliases):
         return "Neutro", "Estudiantes", "Redacción de artículo"
 
-    prompt = f"""Analiza esta noticia para el cliente: "{brand}" (Alias: {', '.join(aliases) if aliases else 'Ninguno'}).
+    json_fields = []
+    steps = []
+    n = 1
+    if request_tone:
+        steps.append(
+            f'{n}. "tono": Impacto reputacional en el cliente ("{brand}"): "Positivo", "Negativo" o "Neutro".\n'
+            '   REGLA DE ORO: Si el cliente expresa o recibe ACOMPAÑAMIENTO, RESPALDO, APOYO, FELICITACIONES, CELEBRACIÓN o ALIANZA, el tono es estrictamente "Positivo".'
+        )
+        json_fields.append('"tono": "..."')
+        n += 1
+    if request_theme:
+        steps.append(
+            f'{n}. "tema": DOMINIO GENERAL (Nivel Macro, 1 a 3 palabras. Ej: "Educación Superior", "Gestión Tributaria", "Sector Salud"). PROHIBIDO "Otros".'
+        )
+        json_fields.append('"tema": "..."')
+        n += 1
 
-Titular de referencia: "{title_ref}"
-Contexto analizado:
-\"\"\"{ctx}\"\"\"
+    subtema_rule = (
+        f'{n}. "subtema": HECHO ESPECÍFICO (frase nominal coherente en español colombiano, '
+        "preferible 4 a 6 palabras. Sin comas ni puntos. "
+        'PROHIBIDO usar "Mención", collage de keywords o recortar el titular).'
+    )
+    steps.append(subtema_rule)
+    json_fields.append('"subtema": "..."')
 
+    if request_theme:
+        differ_rule = 'REGLA OBLIGATORIA: "tema" y "subtema" DEBEN SER DIFERENTES.'
+    elif pkl_theme:
+        differ_rule = (
+            f'TEMA YA CLASIFICADO POR EL MODELO DEL CLIENTE: "{pkl_theme}". '
+            "NO inventes otro tema ni lo copies como subtema. "
+            "El subtema debe ser un hecho más específico y distinto a ese tema."
+        )
+    else:
+        differ_rule = "El subtema debe describir el hecho concreto, no un dominio general."
+
+    tone_examples = ""
+    if request_tone:
+        tone_examples = """
 EJEMPLOS DE TONO OBLIGATORIO:
 - Caso 1: "Sismo en la región: Acompañamos desde la Universidad Autónoma de Occidente a las familias afectadas..."
   -> Tono: "Positivo" (solidaridad y acompañamiento institucional de la marca).
@@ -490,17 +556,21 @@ EJEMPLOS DE TONO OBLIGATORIO:
   -> Tono: "Negativo" (afectación directa).
 - Caso 5: "Boletín general de cifras donde la entidad aporta un dato técnico..."
   -> Tono: "Neutro" (informativo sin juicio de valor).
+"""
 
+    prompt = f"""Analiza esta noticia para el cliente: "{brand}" (Alias: {', '.join(aliases) if aliases else 'Ninguno'}).
+
+Titular de referencia: "{title_ref}"
+Contexto analizado:
+\"\"\"{ctx}\"\"\"
+{tone_examples}
 Instrucciones:
-1. "tono": Impacto reputacional en el cliente ("{brand}"): "Positivo", "Negativo" o "Neutro".
-   REGLA DE ORO: Si el cliente expresa o recibe ACOMPAÑAMIENTO, RESPALDO, APOYO, FELICITACIONES, CELEBRACIÓN o ALIANZA, el tono es estrictamente "Positivo".
-2. "tema": DOMINIO GENERAL (Nivel Macro, 1 a 3 palabras. Ej: "Educación Superior", "Gestión Tributaria", "Sector Salud"). PROHIBIDO "Otros".
-3. "subtema": HECHO ESPECÍFICO (Nivel Micro, máximo 6 palabras. Sin comas ni puntos. PROHIBIDO usar "Mención").
+{chr(10).join(steps)}
 
-REGLA OBLIGATORIA: "tema" y "subtema" DEBEN SER DIFERENTES.
+{differ_rule}
 
 Responde estrictamente en JSON:
-{{"tono": "...", "tema": "...", "subtema": "..."}}"""
+{{{", ".join(json_fields)}}}"""
 
     try:
         resp = client.chat.completions.create(
@@ -511,26 +581,36 @@ Responde estrictamente en JSON:
             ],
             response_format={"type": "json_object"},
             temperature=0.0,
-            max_tokens=100
+            max_tokens=140
         )
         data = json.loads(resp.choices[0].message.content)
-        
-        tono_raw = str(data.get("tono", "Neutro")).strip().capitalize()
-        tono = tono_raw if tono_raw in ["Positivo", "Negativo", "Neutro"] else "Neutro"
-        
-        if check_positive_institutional_override(ctx):
-            tono = "Positivo"
-            
+
+        if request_tone:
+            tono_raw = str(data.get("tono", "Neutro")).strip().capitalize()
+            tono = tono_raw if tono_raw in ["Positivo", "Negativo", "Neutro"] else "Neutro"
+            if check_positive_institutional_override(ctx):
+                tono = "Positivo"
+        else:
+            tono = "Neutro"
+
         subtema = clean_subtema(data.get("subtema", ""), brand, title_ref)
-        tema = clean_tema(data.get("tema", ""))
-        
-        tema = ensure_different_tema_subtema(tema, subtema, ctx)
-        
+
+        if request_theme:
+            tema = clean_tema(data.get("tema", ""))
+            tema = ensure_different_tema_subtema(tema, subtema, ctx)
+        else:
+            tema = (pkl_theme or "").strip() or "Gestión Institucional"
+            subtema = ensure_subtema_distinct_from_tema(tema, subtema, brand, title_ref, ctx)
+
         return tono, tema, subtema
     except Exception as e:
         logger.error(f"Error en llamada OpenAI: {e}")
         sub_fb = _fallback_from_title(title_ref)
-        tema_fb = ensure_different_tema_subtema("Gestión Institucional", sub_fb, ctx)
+        if request_theme:
+            tema_fb = ensure_different_tema_subtema("Gestión Institucional", sub_fb, ctx)
+        else:
+            tema_fb = (pkl_theme or "").strip() or "Gestión Institucional"
+            sub_fb = ensure_subtema_distinct_from_tema(tema_fb, sub_fb, brand, title_ref, ctx)
         tono_fb = "Positivo" if check_positive_institutional_override(ctx) else "Neutro"
         return tono_fb, tema_fb, sub_fb
 
@@ -541,10 +621,15 @@ def enrich_rows_with_ai(
     aliases: List[str],
     api_key: str,
     model: str = "gpt-4.1-nano-2025-04-14",
-    progress_callback: Optional[Callable[[int, str], None]] = None
+    progress_callback: Optional[Callable[[int, str], None]] = None,
+    tone_model=None,
+    theme_model=None,
 ) -> List[dict]:
+    from pkl_classifier import classification_plan, format_theme_label, map_tone_label, _safe_predict
+
     client = OpenAI(api_key=api_key)
-    
+    plan = classification_plan(True, tone_model, theme_model)
+
     brand_regexes = generate_brand_variants(brand, aliases)
     
     if progress_callback:
@@ -576,7 +661,8 @@ def enrich_rows_with_ai(
             cluster_to_sample_idx[cid] = row_idx
             
     cluster_results: Dict[int, Tuple[str, str, str]] = {}
-    
+    cluster_pkl: Dict[int, Tuple[Optional[str], Optional[str]]] = {}
+
     if progress_callback:
         progress_callback(77, f"Analizando {total_clusters} hechos únicos con {model}…")
         
@@ -586,12 +672,44 @@ def enrich_rows_with_ai(
         for cid, row_idx in cluster_to_sample_idx.items():
             ctx = rows[row_idx]["Contexto analizado"]
             t_ref = str(rows[row_idx].get(km.get("titulo", "Título"), ""))
-            fut = executor.submit(_call_openai_cluster, client, model, brand, aliases, brand_regexes, ctx, t_ref)
+            pkl_tone = None
+            pkl_theme = None
+            if tone_model is not None:
+                pkl_tone = map_tone_label(_safe_predict(tone_model, [ctx or ""], "tono")[0])
+            if theme_model is not None:
+                pkl_theme = format_theme_label(_safe_predict(theme_model, [ctx or ""], "tema")[0])
+            cluster_pkl[cid] = (pkl_tone, pkl_theme)
+            fut = executor.submit(
+                _call_openai_cluster,
+                client,
+                model,
+                brand,
+                aliases,
+                brand_regexes,
+                ctx,
+                t_ref,
+                request_tone=plan["use_llm_tone"],
+                request_theme=plan["use_llm_theme"],
+                pkl_theme=pkl_theme,
+            )
             future_to_cid[fut] = cid
             
         for fut in as_completed(future_to_cid):
             cid = future_to_cid[fut]
             tono, tema, subtema = fut.result()
+            pkl_tone, pkl_theme = cluster_pkl.get(cid, (None, None))
+            if pkl_tone:
+                tono = pkl_tone
+            if pkl_theme:
+                tema = pkl_theme
+                sample_idx = cluster_to_sample_idx[cid]
+                subtema = ensure_subtema_distinct_from_tema(
+                    tema,
+                    subtema,
+                    brand,
+                    str(rows[sample_idx].get(km.get("titulo", "Título"), "")),
+                    rows[sample_idx].get("Contexto analizado", ""),
+                )
             cluster_results[cid] = (tono, tema, subtema)
             completed += 1
             if progress_callback and (completed % 15 == 0 or completed == total_clusters):
@@ -607,25 +725,32 @@ def enrich_rows_with_ai(
             row["Subtema_IA"] = "-"
             continue
 
-        # CHEQUEO DIRECTO POR FILA: Si la fila tiene las palabras exactas, se asigna sin condiciones
-        row_full_text = f"{row.get(km.get('titulo', 'Título'), '')} {row.get('Contexto analizado', '')} {row.get('Resumen - Aclaracion', '')}"
-        if check_exact_byline_rule(row_full_text, brand, aliases):
-            row["Tono_IA"] = "Neutro"
-            row["Tema_IA"] = "Estudiantes"
-            row["Subtema_IA"] = "Redacción de artículo"
-            continue
-            
         cid = cluster_map.get(i)
         if cid is not None and cid in cluster_results:
             tono, tema, subtema = cluster_results[cid]
-            tema_final = ensure_different_tema_subtema(tema, subtema, row.get("Contexto analizado", ""))
-            
-            row["Tono_IA"] = tono
-            row["Tema_IA"] = tema_final
-            row["Subtema_IA"] = subtema
         else:
-            row["Tono_IA"] = "Neutro"
-            row["Tema_IA"] = "Gestión Institucional"
-            row["Subtema_IA"] = "Hecho Informativo"
+            tono, tema, subtema = "Neutro", "Gestión Institucional", "Hecho Informativo"
+
+        # CHEQUEO DIRECTO POR FILA: ejes sin PKL siguen la regla de autoría; el subtema no se pierde.
+        row_full_text = f"{row.get(km.get('titulo', 'Título'), '')} {row.get('Contexto analizado', '')} {row.get('Resumen - Aclaracion', '')}"
+        if check_exact_byline_rule(row_full_text, brand, aliases):
+            if tone_model is None:
+                tono = "Neutro"
+            if theme_model is None:
+                tema = "Estudiantes"
+            subtema = "Redacción de artículo"
+
+        if theme_model is None:
+            tema = ensure_different_tema_subtema(tema, subtema, row.get("Contexto analizado", ""))
+        else:
+            subtema = ensure_subtema_distinct_from_tema(
+                tema, subtema, brand,
+                str(row.get(km.get("titulo", "Título"), "")),
+                row.get("Contexto analizado", ""),
+            )
+
+        row["Tono_IA"] = tono
+        row["Tema_IA"] = tema
+        row["Subtema_IA"] = subtema
             
     return rows

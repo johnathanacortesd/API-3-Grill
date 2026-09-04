@@ -846,7 +846,9 @@ def process_dossier(
             aliases=ai_config.get("aliases", []),
             api_key=ai_config["api_key"],
             model=ai_config.get("model", "gpt-4.1-nano-2025-04-14"),
-            progress_callback=progress
+            progress_callback=progress,
+            tone_model=tone_model,
+            theme_model=theme_model,
         )
     elif has_pkl:
         emit_progress(progress, 70, "Preparando textos para clasificadores PKL…")
@@ -856,8 +858,6 @@ def process_dossier(
             brand=(ai_config or {}).get("brand", ""),
             aliases=(ai_config or {}).get("aliases", []),
         )
-
-    if has_pkl:
         emit_progress(progress, 88, "Aplicando modelos PKL del cliente (tono/tema)…")
         rows = apply_pkl_classifiers(
             rows,
@@ -865,6 +865,8 @@ def process_dossier(
             tone_model=tone_model,
             theme_model=theme_model,
             progress_callback=progress,
+            brand=(ai_config or {}).get("brand", ""),
+            aliases=(ai_config or {}).get("aliases", []),
         )
 
     if has_ai or has_pkl:
