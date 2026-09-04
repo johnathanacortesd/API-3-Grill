@@ -77,11 +77,70 @@ class SubtemaQualityWithTemaPklTests(unittest.TestCase):
         self.assertNotIn("mencion", sub.lower())
         self.assertNotEqual(sub.strip().lower(), "rector anuncia")
 
+    def test_simon_bolivar_rejects_lead_scrap_and_keeps_academic_fact(self):
+        ctx = (
+            "De ese barrio salió, primero, un joven que se hizo abogado "
+            "en la Universidad Simón Bolívar de Barranquilla."
+        )
+        brand = "Universidad Simón Bolívar"
+        title = "Historia de un egresado"
+        sub = ensure_subtema_distinct_from_tema("Mención", "Mención", brand, title, ctx)
+        low = sub.strip().lower()
+        self.assertGreaterEqual(len(sub.split()), 4)
+        self.assertLessEqual(len(sub.split()), 7)
+        self.assertFalse(low.startswith("ese barrio"))
+        self.assertFalse(low.startswith("de ese"))
+        self.assertNotIn("salió", low)
+        self.assertNotIn("salio", low)
+        self.assertIn("simón bolívar", low)
+        self.assertFalse(low.endswith("simón"))
+        self.assertTrue(
+            "formación" in low or "formacion" in low or "abogado" in low or "académic" in low
+        )
+
+    def test_simon_bolivar_llm_phrase_completes_name_within_seven(self):
+        ctx = (
+            "De ese barrio salió, primero, un joven que se hizo abogado "
+            "en la Universidad Simón Bolívar de Barranquilla."
+        )
+        brand = "Universidad Simón Bolívar"
+        sub = ensure_subtema_distinct_from_tema(
+            "Mención",
+            "Formación académica en la universidad simón",
+            brand,
+            "Historia de un egresado",
+            ctx,
+        )
+        words = sub.split()
+        self.assertLessEqual(len(words), 7)
+        self.assertGreaterEqual(len(words), 4)
+        self.assertIn("bolívar", sub.lower())
+        self.assertTrue(sub.lower().startswith("formación académica"))
+        self.assertNotIn("ese barrio", sub.lower())
+
+    def test_subtema_max_seven_words_and_rejects_explicit_lead_scrap(self):
+        ctx = (
+            "De ese barrio salió, primero, un joven que se hizo abogado "
+            "en la Universidad Simón Bolívar de Barranquilla."
+        )
+        brand = "Universidad Simón Bolívar"
+        sub = ensure_subtema_distinct_from_tema(
+            "Mención",
+            "Ese barrio salió primero un joven",
+            brand,
+            "Historia de un egresado",
+            ctx,
+        )
+        self.assertLessEqual(len(sub.split()), 7)
+        self.assertNotEqual(sub.strip().lower(), "ese barrio salió primero un joven")
+        self.assertIn("simón bolívar", sub.lower())
+
     def test_ensure_does_not_use_title_scrap_when_context_exists(self):
         title = "Gobierno presenta reforma tributaria en el Congreso"
         ctx = "La universidad anunció diálogo con el rector sobre nuevas becas de posgrado."
         sub = ensure_subtema_distinct_from_tema("Mención", "Mención", "UdeA", title, ctx)
         self.assertGreaterEqual(len(sub.split()), 4)
+        self.assertLessEqual(len(sub.split()), 7)
         self.assertNotEqual(sub.strip().lower(), "gobierno presenta reforma tributaria en el")
         self.assertNotEqual(sub.strip().lower(), title.lower())
         self.assertIn("becas", sub.lower())
@@ -158,6 +217,36 @@ class SubtemaQualityWithTemaPklTests(unittest.TestCase):
         self.assertEqual(out[0]["Subtema_IA"], out[1]["Subtema_IA"])
         self.assertEqual(out[0]["Subtema_IA"], "Apertura de sede norte")
         self.assertEqual(out[0]["Tono_IA"], out[1]["Tono_IA"])
+
+    def test_tema_pkl_pipeline_rewrites_lead_scrap_for_simon_bolivar(self):
+        ctx = (
+            "De ese barrio salió, primero, un joven que se hizo abogado "
+            "en la Universidad Simón Bolívar de Barranquilla."
+        )
+        title = "Historia de un egresado de barrio"
+        rows = [_news_row(title, ctx), _news_row(title, ctx)]
+        theme_model = _PredictByKeyword([], "Mención")
+        with patch("ai_analyzer.OpenAI"):
+            with patch("ai_analyzer._call_openai_cluster") as mock_llm:
+                mock_llm.return_value = (
+                    "Neutro",
+                    "Educación Superior",
+                    "Ese barrio salió primero un joven",
+                )
+                out = enrich_rows_with_ai(
+                    rows,
+                    KEY_MAP,
+                    "Universidad Simón Bolívar",
+                    [],
+                    "sk-test",
+                    theme_model=theme_model,
+                )
+        self.assertEqual(mock_llm.call_count, 1)
+        self.assertEqual(out[0]["Tema_IA"], "Mención")
+        self.assertEqual(out[0]["Subtema_IA"], out[1]["Subtema_IA"])
+        self.assertLessEqual(len(out[0]["Subtema_IA"].split()), 7)
+        self.assertIn("simón bolívar", out[0]["Subtema_IA"].lower())
+        self.assertNotIn("ese barrio", out[0]["Subtema_IA"].lower())
 
 
 class PklGroupingWithoutAiTests(unittest.TestCase):

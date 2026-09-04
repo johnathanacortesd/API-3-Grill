@@ -22,7 +22,7 @@ FORBIDDEN_TRAILING_WORDS = {
 }
 
 MIN_SUBTEMA_WORDS = 4
-MAX_SUBTEMA_WORDS = 6
+MAX_SUBTEMA_WORDS = 7
 
 # Longest first so "mencion del" wins over "mencion de" (which also matches "mencion del…").
 FORBIDDEN_SUBTEMA_PREFIXES = [
@@ -44,6 +44,58 @@ _LEAD_NARRATION_RE = re.compile(
     r"(?:anunci[oó]|inaugur[oó]|present[oó]|inform[oó]|indic[oó]|dijo|"
     r"declar[oó]|revel[oó]|confirm[oó]|destac[oó]|explic[oó]|lanzo|lanz[oó])\s+",
     re.IGNORECASE,
+)
+
+DISCOURSE_STARTERS = {
+    "de", "del", "ese", "esa", "esos", "esas", "este", "esta", "estos", "estas",
+    "aquel", "aquella", "un", "una", "unos", "unas", "el", "la", "los", "las",
+    "que", "se", "su", "sus",
+}
+
+LEAD_ACTION_VERBS = {
+    "salio", "dijo", "hizo", "fue", "era", "eran", "hubo", "hay", "tiene",
+    "llego", "paso", "conto", "vivia", "nacio", "crecio", "tuvo",
+    "anuncio", "inauguro", "presento", "informo", "indico", "declaro",
+    "revelo", "confirmo", "destaco", "explico", "lanzo",
+}
+
+INST_HEADS = {
+    "universidad", "universidades", "fundacion", "clinica", "hospital",
+    "colegio", "instituto", "institucion",
+}
+
+DEGREE_LEMMAS = {
+    "abogado", "abogada", "medico", "medica", "ingeniero", "ingeniera",
+    "licenciado", "licenciada", "profesional", "egresado", "egresada",
+    "graduado", "graduada", "estudiante", "magister", "maestria", "doctorado",
+    "doctorada", "contador", "contadora", "arquitecto", "arquitecta",
+    "enfermero", "enfermera", "psicologo", "psicologa",
+}
+
+FACT_ANCHORS = INST_HEADS | DEGREE_LEMMAS | {
+    "formacion", "academica", "academico", "beca", "becas", "posgrado",
+    "pregrado", "sede", "convenio", "alianza", "dialogo", "inauguracion",
+    "nombramiento", "rector", "rectora", "egresado", "carrera",
+}
+
+CITY_TAILS = {
+    "barranquilla", "bogota", "cali", "medellin", "cartagena", "bucaramanga",
+    "pereira", "manizales", "cucuta", "ibague", "neiva", "pasto", "armenia",
+    "villavicencio", "valledupar", "monteria", "sincelejo", "popayan",
+    "tunja", "riohacha", "quibdo",
+}
+
+_DEGREE_RE = re.compile(
+    r"\b(abogad[oa]s?|m[eé]dic[oa]s?|ingenier[oa]s?|licenciado[as]?|profesional(?:es)?|"
+    r"egresad[oa]s?|graduad[oa]s?|estudiante[s]?|mag[ií]ster|maestr[ií]as?|"
+    r"doctorad[oa]s?|contad[oa]r(?:es)?|arquitect[oa]s?|enfermer[oa]s?|"
+    r"psic[oó]log[oa]s?)\b",
+    re.I,
+)
+_EDU_CUE_RE = re.compile(
+    r"\b(se\s+hizo|estudi[oó]|estudio|egres[oó]|se\s+gradu[oó]|se\s+form[oó]|"
+    r"curs[oó]|formaci[oó]n|acad[eé]mic[oa]|pregrado|posgrado|carrera)\b",
+    re.I,
 )
 
 STOPWORDS_ES = {
@@ -316,15 +368,10 @@ def _normalize_subtema_phrase(text: str, brand: str, tema: str = "") -> str:
         return ""
     clean = re.sub(r'[,.;:!?¿¡"\'\(\)\[\]\{\}\-_/\\|]', " ", str(text))
     words = [w for w in clean.split() if w]
-    if len(words) > MAX_SUBTEMA_WORDS:
-        words = words[:MAX_SUBTEMA_WORDS]
-    while words and words[-1].lower() in FORBIDDEN_TRAILING_WORDS:
-        words.pop()
+    words = _fit_to_max_words(words)
     res = _strip_forbidden_subtema_prefixes(" ".join(words).strip())
     res = _strip_tema_echo_prefix(res, tema)
-    words = [w for w in res.split() if w]
-    while words and words[-1].lower() in FORBIDDEN_TRAILING_WORDS:
-        words.pop()
+    words = _fit_to_max_words([w for w in res.split() if w])
     res = " ".join(words).strip()
     if not res:
         return ""
@@ -338,6 +385,72 @@ def _normalize_subtema_phrase(text: str, brand: str, tema: str = "") -> str:
     }:
         return ""
     return res.capitalize()
+
+
+def _fit_to_max_words(words: List[str]) -> List[str]:
+    words = [w for w in words if w]
+    while words and words[-1].lower() in FORBIDDEN_TRAILING_WORDS:
+        words.pop()
+    while len(words) > MAX_SUBTEMA_WORDS:
+        if len(words) >= 2 and unidecode(words[-2].lower()) in {"de", "del", "en", "por"}:
+            words = words[:-2]
+            continue
+        if unidecode(words[0].lower()) in STOPWORDS_ES or unidecode(words[0].lower()) in DISCOURSE_STARTERS:
+            words = words[1:]
+            continue
+        break
+    if len(words) > MAX_SUBTEMA_WORDS:
+        words = words[:MAX_SUBTEMA_WORDS]
+    while words and words[-1].lower() in FORBIDDEN_TRAILING_WORDS:
+        words.pop()
+    return words
+
+
+def _is_name_continuation(token: str) -> bool:
+    if not token:
+        return False
+    low = unidecode(token.lower())
+    if low in STOPWORDS_ES or low in DISCOURSE_STARTERS or low in LEAD_ACTION_VERBS:
+        return False
+    if token[0].isupper():
+        return True
+    return token[0].isalpha() and low not in CITY_TAILS
+
+
+def _complete_proper_names_from_context(phrase: str, ctx: str) -> str:
+    """If a phrase ends mid proper name (Simón / Universidad Simón), finish it from contexto."""
+    if not phrase or not ctx:
+        return phrase
+    pwords = phrase.split()
+    cwords = _tokenize_phrase_words(ctx)
+    if not pwords or not cwords:
+        return phrase
+    last = unidecode(pwords[-1].lower())
+    phrase_lows = {unidecode(w.lower()) for w in pwords}
+    for i, src in enumerate(cwords):
+        if unidecode(src.lower()) != last:
+            continue
+        j = i + 1
+        extra: List[str] = []
+        while j < len(cwords) and _is_name_continuation(cwords[j]):
+            low = unidecode(cwords[j].lower())
+            if low in phrase_lows:
+                break
+            extra.append(cwords[j])
+            j += 1
+        if extra:
+            fitted = _fit_to_max_words(pwords + extra)
+            # Prefer dropping a leading filler rather than chopping the added surname.
+            while (
+                len(fitted) == MAX_SUBTEMA_WORDS
+                and extra
+                and unidecode(fitted[-1].lower()) != unidecode(extra[-1].lower())
+                and unidecode(fitted[0].lower()) in STOPWORDS_ES | DISCOURSE_STARTERS
+            ):
+                fitted = _fit_to_max_words(fitted[1:] + extra[-1:])
+            return " ".join(fitted)
+        break
+    return phrase
 
 
 def _content_token_set(text: str) -> Set[str]:
@@ -355,17 +468,45 @@ def _is_title_scrap(phrase: str, title: str) -> bool:
         return False
     if phrase_words == title_words[:n]:
         return True
-    # Same after dropping stopwords at the same lead position.
     np = normalize_text_for_matching(phrase)
     nt_lead = normalize_text_for_matching(" ".join(_tokenize_phrase_words(title)[:n]))
     return bool(np) and np == nt_lead
+
+
+def _has_fact_anchor(words: List[str]) -> bool:
+    lows = [unidecode(w.lower()) for w in words]
+    for lw in lows:
+        if lw in FACT_ANCHORS:
+            return True
+        if any(lw.startswith(h) for h in INST_HEADS):
+            return True
+    return False
+
+
+def _is_lead_clause_scrap(words: List[str]) -> bool:
+    """Reject 'De ese barrio salió…' style openers without an institutional fact."""
+    if not words:
+        return True
+    lows = [unidecode(w.lower()) for w in words]
+    start = lows[0]
+    has_anchor = _has_fact_anchor(words)
+    has_lead_verb = any(v in lows for v in {unidecode(x) for x in LEAD_ACTION_VERBS})
+    if start in DISCOURSE_STARTERS and not has_anchor:
+        return True
+    if start in DISCOURSE_STARTERS and has_lead_verb and not any(
+        lw in INST_HEADS or lw in DEGREE_LEMMAS for lw in lows
+    ):
+        return True
+    return False
 
 
 def _is_strong_subtema(phrase: str, tema: str, title: str, brand: str) -> bool:
     if not phrase:
         return False
     words = phrase.split()
-    if len(words) < MIN_SUBTEMA_WORDS:
+    if len(words) < MIN_SUBTEMA_WORDS or len(words) > MAX_SUBTEMA_WORDS:
+        return False
+    if _is_lead_clause_scrap(words):
         return False
     if _labels_too_close(tema, phrase):
         return False
@@ -388,7 +529,92 @@ def _is_strong_subtema(phrase: str, tema: str, title: str, brand: str) -> bool:
     return True
 
 
-def _score_subtema_window(words: List[str], tema: str, title: str, brand: str) -> int:
+def _looks_like_name_part(token: str) -> bool:
+    if not token:
+        return False
+    low = unidecode(token.lower())
+    if low in LEAD_ACTION_VERBS or low in DISCOURSE_STARTERS or low in STOPWORDS_ES:
+        return False
+    if token[0].isupper():
+        return True
+    return token[0].isalpha()
+
+
+def _institution_span(words: List[str], start_idx: int) -> List[str]:
+    if start_idx >= len(words):
+        return []
+    if start_idx + 1 < len(words):
+        nxt = unidecode(words[start_idx + 1].lower())
+        if nxt in LEAD_ACTION_VERBS:
+            return []
+    span = [words[start_idx]]
+    j = start_idx + 1
+    while j < len(words):
+        w = words[j]
+        low = unidecode(w.lower())
+        if low in {"de", "del", "la", "las", "los", "el"}:
+            if j + 1 < len(words) and _looks_like_name_part(words[j + 1]):
+                span.append(w)
+                j += 1
+                continue
+            break
+        if _looks_like_name_part(w):
+            span.append(w)
+            j += 1
+            continue
+        break
+    return span if len(span) >= 2 else []
+
+
+def _split_inst_core_loc(inst: List[str]) -> Tuple[List[str], List[str]]:
+    lows = [unidecode(w.lower()) for w in inst]
+    for i in range(1, len(inst) - 1):
+        if lows[i] in {"de", "del"} and lows[i + 1] in CITY_TAILS:
+            return inst[:i], inst[i:]
+    return inst, []
+
+
+def _join_prefix_and_inst(prefix: List[str], inst_core: List[str]) -> List[str]:
+    prefix = list(prefix)
+    inst_core = list(inst_core)
+    while prefix and len(prefix) + len(inst_core) > MAX_SUBTEMA_WORDS:
+        last_low = unidecode(prefix[-1].lower())
+        if last_low in STOPWORDS_ES or last_low in DISCOURSE_STARTERS or last_low == "academica":
+            prefix.pop()
+            continue
+        if unidecode(prefix[0].lower()) in STOPWORDS_ES or unidecode(prefix[0].lower()) in DISCOURSE_STARTERS:
+            prefix.pop(0)
+            continue
+        break
+    return _fit_to_max_words(prefix + inst_core)
+
+
+def _education_fact_phrase(ctx: str, brand: str) -> str:
+    words = _tokenize_phrase_words(ctx)
+    lows = [unidecode(w.lower()) for w in words]
+    inst_idx = next((i for i, lw in enumerate(lows) if lw in INST_HEADS), None)
+    if inst_idx is None:
+        return ""
+    inst = _institution_span(words, inst_idx)
+    if not inst:
+        return ""
+    inst_core, _loc = _split_inst_core_loc(inst)
+    if not inst_core:
+        return ""
+    has_degree = _DEGREE_RE.search(ctx or "") is not None
+    has_edu_cue = has_degree or _EDU_CUE_RE.search(ctx or "") is not None
+    if has_edu_cue:
+        fitted = _join_prefix_and_inst(["Formación", "académica", "en", "la"], inst_core)
+        return _normalize_subtema_phrase(" ".join(fitted), brand)
+    if len(inst_core) >= MIN_SUBTEMA_WORDS:
+        return _normalize_subtema_phrase(" ".join(inst_core), brand)
+    fitted = _join_prefix_and_inst(["Actividad", "en", "la"], inst_core)
+    return _normalize_subtema_phrase(" ".join(fitted), brand)
+
+
+def _score_subtema_window(words: List[str], tema: str, title: str, brand: str, at_sentence_start: bool = False) -> int:
+    if _is_lead_clause_scrap(words):
+        return -120
     phrase = " ".join(words)
     low = unidecode(phrase.lower())
     if any(re.match(rf"^{re.escape(fs)}\b", low) for fs in FORBIDDEN_SUBTEMA_PREFIXES):
@@ -413,40 +639,60 @@ def _score_subtema_window(words: List[str], tema: str, title: str, brand: str) -
         wl = unidecode(w.lower())
         if wl.endswith(("cion", "sion", "miento", "dad", "aje", "ncia", "encia", "ura", "azgo")):
             noun_bonus += 8
+        if wl in FACT_ANCHORS or wl in INST_HEADS or wl in DEGREE_LEMMAS:
+            noun_bonus += 18
     start = unidecode(words[0].lower())
-    start_pen = -8 if start in STOPWORDS_ES else 6
+    start_pen = -25 if start in DISCOURSE_STARTERS else (-8 if start in STOPWORDS_ES else 6)
+    lead_pen = 40 if at_sentence_start and start in DISCOURSE_STARTERS else 0
     brand_words = set(re.findall(r"\b[a-z0-9]+\b", unidecode(brand.lower())))
     brand_pen = 20 if phrase_toks and phrase_toks.issubset(brand_words) else 0
-    return 12 * len(content) + noun_bonus + start_pen - title_pen - (12 * bleed_n) - brand_pen
+    return (
+        12 * len(content)
+        + noun_bonus
+        + start_pen
+        - title_pen
+        - lead_pen
+        - (12 * bleed_n)
+        - brand_pen
+    )
 
 
 def _noun_phrase_from_context(ctx: str, tema: str, title: str, brand: str) -> str:
+    """Build a fact noun phrase from contexto; never return a lead-clause scrap."""
     text = str(ctx or "").strip()
     if not text or text == "-":
         return ""
-    text = _LEAD_NARRATION_RE.sub("", text)
-    text = re.sub(
+    edu = _education_fact_phrase(text, brand)
+    if edu and not _is_lead_clause_scrap(edu.split()) and not _labels_too_close(tema, edu):
+        edu = _complete_proper_names_from_context(edu, text)
+        return _normalize_subtema_phrase(edu, brand, tema)
+
+    stripped = _LEAD_NARRATION_RE.sub("", text)
+    stripped = re.sub(
         r"^(?:[A-ZÁÉÍÓÚÑ][\wÁÉÍÓÚáéíóúñü]+(?:\s+[A-ZÁÉÍÓÚÑ][\wÁÉÍÓÚáéíóúñü]+){0,5})\s+"
         r"(?:anunci[oó]|inaugur[oó]|present[oó]|inform[oó]|dijo|declar[oó]|lanzo|lanz[oó])\s+",
         "",
-        text,
+        stripped,
         flags=re.IGNORECASE,
     )
-    words = _tokenize_phrase_words(text)
+    words = _tokenize_phrase_words(stripped)
     if len(words) < MIN_SUBTEMA_WORDS:
         return ""
     best = ""
     best_score = -1
+    orig_lead = [unidecode(w.lower()) for w in _tokenize_phrase_words(text)[:3]]
     for n in range(MAX_SUBTEMA_WORDS, MIN_SUBTEMA_WORDS - 1, -1):
         for i in range(0, len(words) - n + 1):
             window = words[i:i + n]
-            score = _score_subtema_window(window, tema, title, brand)
+            at_start = [unidecode(w.lower()) for w in window[:2]] == orig_lead[:2]
+            score = _score_subtema_window(window, tema, title, brand, at_sentence_start=at_start)
             if score > best_score:
                 best_score = score
                 best = " ".join(window)
     if best_score < 0 or not best:
-        return ""
-    return _normalize_subtema_phrase(best, brand, tema)
+        return edu
+    completed = _complete_proper_names_from_context(best, text)
+    return _normalize_subtema_phrase(completed, brand, tema)
 
 
 def clean_subtema(text: str, brand: str, title_fallback: str) -> str:
@@ -516,7 +762,7 @@ def _fallback_from_title(title: str) -> str:
         return "Hecho Informativo"
     t = re.sub(r"^(?:imagenes|video|en fotos)\s*\|\s*", "", title, flags=re.IGNORECASE).strip()
     words = re.sub(r'[,.;:!?¿¡"\'\(\)\[\]\{\}\-_/\\|]', ' ', t).split()
-    clean_words = words[:6]
+    clean_words = words[:MAX_SUBTEMA_WORDS]
     while clean_words and clean_words[-1].lower() in FORBIDDEN_TRAILING_WORDS:
         clean_words.pop()
     return " ".join(clean_words).capitalize() if clean_words else "Hecho Informativo"
@@ -657,47 +903,28 @@ def ensure_subtema_distinct_from_tema(
     title: str,
     ctx: str,
 ) -> str:
-    """Keep a specific 4–6 word noun phrase, distinct from the PKL tema. Prefer context over title scrap."""
-    ordered: List[str] = []
-
+    """Keep a 4–7 word fact noun phrase, distinct from the PKL tema. Never use a lead-clause scrap."""
     llm_clean = clean_subtema_specific(subtema or "", brand, tema)
     if llm_clean:
-        ordered.append(llm_clean)
+        llm_clean = _complete_proper_names_from_context(llm_clean, ctx)
+        llm_clean = _normalize_subtema_phrase(llm_clean, brand, tema)
 
     ctx_phrase = _noun_phrase_from_context(ctx, tema, title, brand)
     if ctx_phrase:
-        ordered.append(ctx_phrase)
+        ctx_phrase = _complete_proper_names_from_context(ctx_phrase, ctx)
+        ctx_phrase = _normalize_subtema_phrase(ctx_phrase, brand, tema)
 
-    ctx_clean = clean_subtema_specific(str(ctx or ""), brand, tema)
-    if ctx_clean:
-        ordered.append(ctx_clean)
-
-    for candidate in ordered:
-        if _is_strong_subtema(candidate, tema, title, brand):
-            return candidate
-
-    for candidate in ordered:
-        words = candidate.split()
-        if (
-            len(words) >= MIN_SUBTEMA_WORDS
-            and not _labels_too_close(tema, candidate)
-            and not _is_title_scrap(candidate, title)
-        ):
-            return candidate
-
-    if ctx_phrase and not _labels_too_close(tema, ctx_phrase) and len(ctx_phrase.split()) >= MIN_SUBTEMA_WORDS:
+    if llm_clean and _is_strong_subtema(llm_clean, tema, title, brand):
+        return llm_clean
+    if ctx_phrase and _is_strong_subtema(ctx_phrase, tema, title, brand):
         return ctx_phrase
-
-    # Last resort: left-aligned 4–6 words from context, never a 2-word leftover or tema echo.
-    ctx_words = _tokenize_phrase_words(_LEAD_NARRATION_RE.sub("", str(ctx or "")))
-    if len(ctx_words) >= MIN_SUBTEMA_WORDS:
-        fallback = _normalize_subtema_phrase(
-            " ".join(ctx_words[:MAX_SUBTEMA_WORDS]), brand, tema
-        )
-        if fallback and not _labels_too_close(tema, fallback) and len(fallback.split()) >= MIN_SUBTEMA_WORDS:
-            return fallback
-
-    return llm_clean or ctx_phrase or "Hecho informativo institucional"
+    if ctx_phrase and not _is_lead_clause_scrap(ctx_phrase.split()) and not _labels_too_close(tema, ctx_phrase):
+        if MIN_SUBTEMA_WORDS <= len(ctx_phrase.split()) <= MAX_SUBTEMA_WORDS:
+            return ctx_phrase
+    if llm_clean and not _is_lead_clause_scrap(llm_clean.split()) and not _labels_too_close(tema, llm_clean):
+        if MIN_SUBTEMA_WORDS <= len(llm_clean.split()) <= MAX_SUBTEMA_WORDS:
+            return llm_clean
+    return ctx_phrase or llm_clean or "Hecho informativo institucional"
 
 
 def _call_openai_cluster(
@@ -736,8 +963,9 @@ def _call_openai_cluster(
 
     subtema_rule = (
         f'{n}. "subtema": HECHO ESPECÍFICO: una sola frase nominal coherente en español colombiano, '
-        "de 4 a 6 palabras o más (no collage de keywords). Sin comas ni puntos. "
-        'PROHIBIDO usar "Mención", recortar el titular, o copiar el tema.'
+        "de 4 a 7 palabras (máximo 7), completa, sin cortar nombres propios. "
+        "Describe el hecho (formación, grado, evento), no la cláusula inicial de la frase. "
+        'Sin comas ni puntos. PROHIBIDO "Mención", collage, recortar el titular o copiar el tema.'
     )
     steps.append(subtema_rule)
     json_fields.append('"subtema": "..."')
@@ -749,10 +977,10 @@ def _call_openai_cluster(
             f'TEMA YA CLASIFICADO POR EL MODELO DEL CLIENTE: "{pkl_theme}". '
             "NO inventes otro tema. NO copies ese tema ni lo parafrasees como subtema "
             '(MAL: tema "Entrevista" → subtema "Entrevista al rector"; '
-            'MAL: "Mención", "Mención del rector", collage "rector becas cali"). '
-            "El subtema debe ser una frase nominal concreta de 4 a 6+ palabras, "
-            "distinta al tema, extraída del hecho (BIEN: "
-            '"Diálogo del rector sobre becas de posgrado").'
+            'MAL: "Mención"; MAL: recortar el inicio "Ese barrio salió primero un joven"). '
+            "El subtema debe ser una frase nominal concreta de 4 a 7 palabras, "
+            "con nombres propios completos, distinta al tema "
+            '(BIEN: "Formación académica en la Universidad Simón Bolívar").'
         )
     else:
         differ_rule = "El subtema debe describir el hecho concreto, no un dominio general."
