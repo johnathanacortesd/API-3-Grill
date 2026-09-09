@@ -243,11 +243,7 @@ def apply_pkl_classifiers(
 
     if unify_similar:
         regexes = generate_brand_variants(brand, list(aliases or [])) if brand else []
-        if progress_callback:
-            progress_callback(min(93, 88), f"Agrupando noticias similares para PKL… {len(active)} notas")
-        cluster_map = cluster_similar_rows(
-            rows, km, regexes, progress_callback=progress_callback, progress_pct=88
-        )
+        cluster_map = cluster_similar_rows(rows, km, regexes)
     else:
         cluster_map = {i: i for i in active}
 
