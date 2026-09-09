@@ -243,9 +243,7 @@ def apply_pkl_classifiers(
 
     if unify_similar:
         regexes = generate_brand_variants(brand, list(aliases or [])) if brand else []
-        cluster_map = cluster_similar_rows(
-            rows, km, regexes, brand=brand, aliases=list(aliases or [])
-        )
+        cluster_map = cluster_similar_rows(rows, km, regexes)
     else:
         cluster_map = {i: i for i in active}
 
@@ -262,21 +260,19 @@ def apply_pkl_classifiers(
 
     if tone_model is not None:
         if progress_callback:
-            progress_callback(min(93, 88), "Clasificando tono con modelo PKL del cliente…")
-        preds = _safe_predict(tone_model, rep_texts, "tono")
-        for cid, pred in zip(ordered_cids, preds):
-            label = map_tone_label(pred)
-            for idx in members[cid]:
-                rows[idx]["Tono_IA"] = label
+            progress_callback(min(93, 88), "Clasificando tono por fila y marca…")
+        row_texts = [text_for_classification(rows[i], km) or "" for i in active]
+        preds = _safe_predict(tone_model, row_texts, "tono")
+        for idx, pred in zip(active, preds):
+            rows[idx]["Tono_IA"] = map_tone_label(pred)
 
     if theme_model is not None:
         if progress_callback:
-            progress_callback(min(93, 90), "Clasificando tema con modelo PKL del cliente…")
-        preds = _safe_predict(theme_model, rep_texts, "tema")
-        for cid, pred in zip(ordered_cids, preds):
-            label = format_theme_label(pred) or rows[reps[cid]].get("Tema_IA") or "-"
-            for idx in members[cid]:
-                rows[idx]["Tema_IA"] = label
+            progress_callback(min(93, 90), "Clasificando tema por fila…")
+        row_texts = [text_for_classification(rows[i], km) or "" for i in active]
+        preds = _safe_predict(theme_model, row_texts, "tema")
+        for idx, pred in zip(active, preds):
+            rows[idx]["Tema_IA"] = format_theme_label(pred) or rows[idx].get("Tema_IA") or "-"
 
     return rows
 
