@@ -93,18 +93,47 @@ def build_brand_context(title: str, body: str, brand: str, aliases: List[str]) -
     variants = normalize_brand_mentions(brand, aliases)
     sources = [("Cuerpo", body or ""), ("Título", title or "")]
     for origin, source in sources:
-        clean = clean_text_strictly_no_links(source)
+        raw = str(source or "")
+        paragraphs = [p.strip() for p in re.split(r"\n+", raw) if p.strip()]
+        clean = clean_text_strictly_no_links(raw)
         norm = unidecode(clean.lower())
-        if clean and any(re.search(r"(?<!\\w)" + re.escape(v) + r"(?!\\w)", norm) for v in variants):
-            paragraphs = [p.strip() for p in re.split(r"\\n+", clean) if p.strip()]
-            for paragraph in paragraphs:
+        if clean and any(re.search(r"(?<!\w)" + re.escape(v) + r"(?!\w)", norm) for v in variants):
+            for paragraph_raw in paragraphs:
+                paragraph = clean_text_strictly_no_links(paragraph_raw)
                 pn = unidecode(paragraph.lower())
-                if any(re.search(r"(?<!\\w)" + re.escape(v) + r"(?!\\w)", pn) for v in variants):
+                if any(re.search(r"(?<!\w)" + re.escape(v) + r"(?!\w)", pn) for v in variants):
                     return {"text": paragraph[:1200], "presence": "present", "origin": origin}
             return {"text": clean[:1200], "presence": "present", "origin": origin}
     return {"text": "", "presence": "absent", "origin": ""}
 
 
+def classify_brand_tone_rules(context: str, brand: str, aliases: List[str]) -> str:
+    """Clasifica el tono sobre la relación de la marca con el hecho, no sobre el tema general."""
+    text = unidecode(str(context or "").lower())
+    target = [unidecode(str(brand or "").lower())] + [unidecode(str(a).lower()) for a in (aliases or [])]
+    target = [x for x in target if x]
+    if not text or not any(re.search(r"(?<!\\w)" + re.escape(x) + r"(?!\\w)", text) for x in target):
+        return "No aplica"
+    negative_words = {
+        "critica", "critican", "cuestiona", "cuestionan", "denuncia", "denuncian",
+        "queja", "quejas", "falla", "fallas", "irregularidad", "sancion", "investiga",
+        "investigacion", "incumpl", "problema", "problemas", "rechaza", "rechazo"
+    }
+    positive_words = {
+        "participa", "participan", "participo", "participó", "participaron", "participacion", "participación", "apoya", "apoyo", "alianza", "convenio",
+        "acuerdo", "celebra", "celebracion", "organiza", "lidera", "presenta", "ofrece",
+        "reconoce", "reconocimiento", "inaugura", "inauguracion", "beneficia", "impulsa"
+    }
+
+    target_pos = [m.start() for x in target for m in re.finditer(r"(?<!\\w)" + re.escape(x) + r"(?!\\w)", text)]
+    if not target_pos:
+        return "No aplica"
+    windows = [text[max(0, p - 180):p + 220] for p in target_pos]
+    if any(any(word in w for word in negative_words) for w in windows):
+        return "Negativo"
+    if any(any(word in w for word in positive_words) for w in windows):
+        return "Positivo"
+    return "Neutro"
 def subtopic_from_event(text: str, brand: str = "") -> str:
     """Fallback conservador: conserva acción y objeto, no solo el nombre de la marca."""
     clean = clean_text_strictly_no_links(text)
@@ -475,7 +504,7 @@ def _cluster_similar_rows_greedy(rows: List[dict], km: dict, brand_regexes: List
     return cluster_map
 
 def cluster_similar_rows(rows: List[dict], km: dict, brand_regexes: List[str]) -> Dict[int, int]:
-    """Agrupa por componentes conexos de coincidencias fuertes, estable al ordenar filas."""
+    """Agrupa por texto de titular y por contexto completo, de forma estable."""
     active = [i for i, row in enumerate(rows) if not row.get("is_duplicate")]
     parent = {i: i for i in active}
 
@@ -491,19 +520,31 @@ def cluster_similar_rows(rows: List[dict], km: dict, brand_regexes: List[str]) -
             parent[max(ra, rb)] = min(ra, rb)
 
     signatures = {}
+    normalized_contexts = {}
     for i in active:
         title = str(rows[i].get(km.get("titulo", "Título"), ""))
-        norm = normalize_text_for_matching(title)
-        words = tuple(get_lead_content_words(norm, 3))
-        if len(words) >= 3:
-            signatures.setdefault(words, []).append(i)
+        title_norm = normalize_text_for_matching(title)
+        lead = tuple(get_lead_content_words(title_norm, 3))
+        if len(lead) >= 3:
+            signatures.setdefault(("lead", lead), []).append(i)
         anchor = extract_event_anchor(title)
         if anchor:
             signatures.setdefault(("anchor", anchor), []).append(i)
+        context = normalize_text_for_matching(str(rows[i].get("Contexto analizado", "")))
+        if context:
+            normalized_contexts[i] = context
+            words = get_content_words_set(context)
+            if len(words) >= 5:
+                signatures.setdefault(("context", tuple(sorted(words))), []).append(i)
 
     for members in signatures.values():
         for a, b in zip(members, members[1:]):
             union(a, b)
+    context_ids = sorted(normalized_contexts)
+    for pos, a in enumerate(context_ids):
+        for b in context_ids[pos + 1:]:
+            if fuzz.token_set_ratio(normalized_contexts[a], normalized_contexts[b]) >= 82:
+                union(a, b)
 
     ordered_roots = {root: n for n, root in enumerate(sorted({find(i) for i in active}))}
     return {i: ordered_roots[find(i)] for i in active}
@@ -801,7 +842,11 @@ def enrich_rows_with_ai(
             tono, tema, subtema = "Neutro", "Gestión Institucional", "Hecho Informativo"
 
         # CHEQUEO DIRECTO POR FILA: ejes sin PKL siguen la regla de autoría; el subtema no se pierde.
-        row_full_text = f"{row.get(km.get('titulo', 'Título'), '')} {row.get('Contexto analizado', '')} {row.get('Resumen - Aclaracion', '')}"
+        row_full_text = f"{row.get(km.get('titulo', 'Título'), '')} {row.get('Contexto analizado', '')}"
+        rule_tone = classify_brand_tone_rules(row_full_text, brand, aliases)
+        if rule_tone in {"Positivo", "Negativo"}:
+            tono = rule_tone
+
         if check_exact_byline_rule(row_full_text, brand, aliases):
             if tone_model is None:
                 tono = "Neutro"
