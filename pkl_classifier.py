@@ -243,9 +243,7 @@ def apply_pkl_classifiers(
 
     if unify_similar:
         regexes = generate_brand_variants(brand, list(aliases or [])) if brand else []
-        cluster_map = cluster_similar_rows(
-            rows, km, regexes, brand=brand, aliases=list(aliases or [])
-        )
+        cluster_map = cluster_similar_rows(rows, km, regexes)
     else:
         cluster_map = {i: i for i in active}
 
