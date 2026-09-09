@@ -363,15 +363,49 @@ def _strip_tema_echo_prefix(text: str, tema: str) -> str:
     return text
 
 
+_DE_WORDS = {"de", "del"}
+
+
+def _collapse_repeated_prepositions(words: List[str]) -> List[str]:
+    """Drop stacked 'de de' glue that produces keyword collages."""
+    out: List[str] = []
+    prev_de = False
+    for w in words:
+        is_de = unidecode(w.lower()) in _DE_WORDS
+        if is_de and prev_de:
+            continue
+        out.append(w)
+        prev_de = is_de
+    return out
+
+
+def _is_de_collage(words: List[str]) -> bool:
+    """True when 'de' is stuffing keywords together rather than a noun phrase."""
+    if not words:
+        return False
+    lows = [unidecode(w.lower()) for w in words]
+    de_n = sum(1 for w in lows if w in _DE_WORDS)
+    if any(lows[i] in _DE_WORDS and lows[i + 1] in _DE_WORDS for i in range(len(lows) - 1)):
+        return True
+    if de_n >= 3:
+        return True
+    return False
+
+
 def _normalize_subtema_phrase(text: str, brand: str, tema: str = "") -> str:
     if not text:
         return ""
     clean = re.sub(r'[,.;:!?¿¡"\'\(\)\[\]\{\}\-_/\\|]', " ", str(text))
     words = [w for w in clean.split() if w]
+    if _is_de_collage(words):
+        return ""
+    words = _collapse_repeated_prepositions(words)
     words = _fit_to_max_words(words)
     res = _strip_forbidden_subtema_prefixes(" ".join(words).strip())
     res = _strip_tema_echo_prefix(res, tema)
-    words = _fit_to_max_words([w for w in res.split() if w])
+    words = _fit_to_max_words(_collapse_repeated_prepositions([w for w in res.split() if w]))
+    if _is_de_collage(words):
+        return ""
     res = " ".join(words).strip()
     if not res:
         return ""
@@ -388,7 +422,7 @@ def _normalize_subtema_phrase(text: str, brand: str, tema: str = "") -> str:
 
 
 def _fit_to_max_words(words: List[str]) -> List[str]:
-    words = [w for w in words if w]
+    words = _collapse_repeated_prepositions([w for w in words if w])
     while words and words[-1].lower() in FORBIDDEN_TRAILING_WORDS:
         words.pop()
     while len(words) > MAX_SUBTEMA_WORDS:
@@ -403,7 +437,7 @@ def _fit_to_max_words(words: List[str]) -> List[str]:
         words = words[:MAX_SUBTEMA_WORDS]
     while words and words[-1].lower() in FORBIDDEN_TRAILING_WORDS:
         words.pop()
-    return words
+    return _collapse_repeated_prepositions(words)
 
 
 def _is_name_continuation(token: str) -> bool:
@@ -526,6 +560,8 @@ def _is_strong_subtema(phrase: str, tema: str, title: str, brand: str) -> bool:
         return False
     if _is_title_scrap(phrase, title):
         return False
+    if _is_de_collage(words):
+        return False
     return True
 
 
@@ -646,6 +682,8 @@ def _score_subtema_window(words: List[str], tema: str, title: str, brand: str, a
     lead_pen = 40 if at_sentence_start and start in DISCOURSE_STARTERS else 0
     brand_words = set(re.findall(r"\b[a-z0-9]+\b", unidecode(brand.lower())))
     brand_pen = 20 if phrase_toks and phrase_toks.issubset(brand_words) else 0
+    de_n = sum(1 for w in words if unidecode(w.lower()) in _DE_WORDS)
+    de_pen = 80 if _is_de_collage(words) else (18 * max(0, de_n - 1))
     return (
         12 * len(content)
         + noun_bonus
@@ -654,6 +692,7 @@ def _score_subtema_window(words: List[str], tema: str, title: str, brand: str, a
         - lead_pen
         - (12 * bleed_n)
         - brand_pen
+        - de_pen
     )
 
 
@@ -684,6 +723,8 @@ def _noun_phrase_from_context(ctx: str, tema: str, title: str, brand: str) -> st
     for n in range(MAX_SUBTEMA_WORDS, MIN_SUBTEMA_WORDS - 1, -1):
         for i in range(0, len(words) - n + 1):
             window = words[i:i + n]
+            if _is_de_collage(window):
+                continue
             at_start = [unidecode(w.lower()) for w in window[:2]] == orig_lead[:2]
             score = _score_subtema_window(window, tema, title, brand, at_sentence_start=at_start)
             if score > best_score:
@@ -767,19 +808,26 @@ def _fallback_from_title(title: str) -> str:
         clean_words.pop()
     return " ".join(clean_words).capitalize() if clean_words else "Hecho Informativo"
 
-def cluster_similar_rows(rows: List[dict], km: dict, brand_regexes: List[str]) -> Dict[int, int]:
+def cluster_similar_rows(
+    rows: List[dict],
+    km: dict,
+    brand_regexes: List[str],
+    progress_callback: Optional[Callable[[int, str], None]] = None,
+    progress_pct: int = 74,
+) -> Dict[int, int]:
     n = len(rows)
     cluster_map = {}
     clusters_rep = {}
     current_cluster = 0
     
     active_indices = [i for i in range(n) if not rows[i].get("is_duplicate")]
+    total_active = len(active_indices)
     sorted_indices = sorted(
         active_indices,
         key=lambda idx: normalize_text_for_matching(str(rows[idx].get(km.get("titulo", "Título"), "")))
     )
 
-    for i in sorted_indices:
+    for k, i in enumerate(sorted_indices, start=1):
         t_raw = str(rows[i].get(km.get("titulo", "Título"), ""))
         r_raw = str(rows[i].get("Resumen - Aclaracion") or rows[i].get("resumen corto") or "")
         
@@ -788,6 +836,7 @@ def cluster_similar_rows(rows: List[dict], km: dict, brand_regexes: List[str]) -
         lead_words = get_lead_content_words(t_norm, n_words=3)
         anchor = extract_event_anchor(t_raw)
         r_norm = normalize_text_for_matching(r_raw[:350])
+        r_words = get_content_words_set(r_norm)
         
         assigned = False
         for cid, rep in clusters_rep.items():
@@ -796,6 +845,7 @@ def cluster_similar_rows(rows: List[dict], km: dict, brand_regexes: List[str]) -
             rep_lead = rep["lead_words"]
             rep_anchor = rep["anchor"]
             rep_r = rep["body_norm"]
+            rep_r_words = rep["body_words"]
             
             if anchor and rep_anchor and anchor == rep_anchor:
                 cluster_map[i] = cid
@@ -824,24 +874,29 @@ def cluster_similar_rows(rows: List[dict], km: dict, brand_regexes: List[str]) -
                     cluster_map[i] = cid
                     assigned = True
                     break
-                if fuzz.partial_ratio(t_norm, rep_t) >= 86:
-                    cluster_map[i] = cid
-                    assigned = True
-                    break
-            
+
             overlap = c_words & rep_words
             if len(overlap) >= 4 or (len(overlap) >= 3 and any(re.search(rx, " ".join(overlap)) for rx in brand_regexes)):
                 cluster_map[i] = cid
                 assigned = True
                 break
-                
-            if t_norm and rep_t:
+
+            # Skip expensive fuzzy ratios when titles/bodies share almost no content.
+            body_overlap = r_words & rep_r_words
+            if len(overlap) < 2 and len(body_overlap) < 3:
+                continue
+
+            if len(overlap) >= 2 and t_norm and rep_t:
+                if fuzz.partial_ratio(t_norm, rep_t) >= 86:
+                    cluster_map[i] = cid
+                    assigned = True
+                    break
                 if fuzz.token_set_ratio(t_norm, rep_t) >= 70:
                     cluster_map[i] = cid
                     assigned = True
                     break
             
-            if r_norm and rep_r and len(r_norm) > 40 and len(rep_r) > 40:
+            if r_norm and rep_r and len(r_norm) > 40 and len(rep_r) > 40 and len(body_overlap) >= 3:
                 if fuzz.token_set_ratio(r_norm, rep_r) >= 82:
                     cluster_map[i] = cid
                     assigned = True
@@ -854,9 +909,16 @@ def cluster_similar_rows(rows: List[dict], km: dict, brand_regexes: List[str]) -
                 "content_words": c_words,
                 "lead_words": lead_words,
                 "anchor": anchor,
-                "body_norm": r_norm
+                "body_norm": r_norm,
+                "body_words": r_words,
             }
             current_cluster += 1
+
+        if progress_callback and (k == 1 or k % 40 == 0 or k == total_active):
+            progress_callback(
+                progress_pct,
+                f"Agrupando noticias similares… {k}/{total_active} notas, {current_cluster} hechos",
+            )
             
     return cluster_map
 
@@ -965,7 +1027,8 @@ def _call_openai_cluster(
         f'{n}. "subtema": HECHO ESPECÍFICO: una sola frase nominal coherente en español colombiano, '
         "de 4 a 7 palabras (máximo 7), completa, sin cortar nombres propios. "
         "Describe el hecho (formación, grado, evento), no la cláusula inicial de la frase. "
-        'Sin comas ni puntos. PROHIBIDO "Mención", collage, recortar el titular o copiar el tema.'
+        'Sin comas ni puntos. PROHIBIDO "Mención", collage, recortar el titular o copiar el tema. '
+        'PROHIBIDO pegar palabras sueltas con "de" (MAL: "abogado de universidad de joven de barrio").'
     )
     steps.append(subtema_rule)
     json_fields.append('"subtema": "..."')
@@ -1061,6 +1124,32 @@ Responde estrictamente en JSON:
         tono_fb = "Positivo" if check_positive_institutional_override(ctx) else "Neutro"
         return tono_fb, tema_fb, sub_fb
 
+
+def _batch_pkl_labels_for_clusters(
+    ordered_cids: List[int],
+    sample_texts: List[str],
+    tone_model,
+    theme_model,
+    progress_callback: Optional[Callable[[int, str], None]] = None,
+) -> Dict[int, Tuple[Optional[str], Optional[str]]]:
+    """One sklearn predict per axis (not per cluster) so hundreds of notes don't stall."""
+    from pkl_classifier import format_theme_label, map_tone_label, _safe_predict
+
+    tones: List[Optional[str]] = [None] * len(ordered_cids)
+    themes: List[Optional[str]] = [None] * len(ordered_cids)
+    if tone_model is not None:
+        if progress_callback:
+            progress_callback(75, f"Clasificando tono PKL en lote ({len(sample_texts)} hechos)…")
+        preds = _safe_predict(tone_model, sample_texts, "tono")
+        tones = [map_tone_label(p) for p in preds]
+    if theme_model is not None:
+        if progress_callback:
+            progress_callback(76, f"Clasificando tema PKL en lote ({len(sample_texts)} hechos)…")
+        preds = _safe_predict(theme_model, sample_texts, "tema")
+        themes = [format_theme_label(p) or None for p in preds]
+    return {cid: (tones[i], themes[i]) for i, cid in enumerate(ordered_cids)}
+
+
 def enrich_rows_with_ai(
     rows: List[dict],
     km: dict,
@@ -1072,15 +1161,17 @@ def enrich_rows_with_ai(
     tone_model=None,
     theme_model=None,
 ) -> List[dict]:
-    from pkl_classifier import classification_plan, format_theme_label, map_tone_label, _safe_predict
+    from pkl_classifier import classification_plan
 
     client = OpenAI(api_key=api_key)
     plan = classification_plan(True, tone_model, theme_model)
 
     brand_regexes = generate_brand_variants(brand, aliases)
+    n_active = sum(1 for row in rows if not row.get("is_duplicate"))
     
     if progress_callback:
-        progress_callback(71, "Extrayendo contexto de la marca y sus variantes para auditoría…")
+        progress_callback(71, f"Extrayendo contexto de la marca… 0/{n_active} notas")
+    done_ctx = 0
     for row in rows:
         if row.get("is_duplicate"):
             row["Contexto analizado"] = "-"
@@ -1094,10 +1185,15 @@ def enrich_rows_with_ai(
                 brand_regexes
             )
             row["Contexto analizado"] = ctx
+            done_ctx += 1
+            if progress_callback and (done_ctx == 1 or done_ctx % 80 == 0 or done_ctx == n_active):
+                progress_callback(71, f"Extrayendo contexto de la marca… {done_ctx}/{n_active} notas")
 
     if progress_callback:
-        progress_callback(74, "Agrupando eventos y noticias similares (ordenamiento por titular)…")
-    cluster_map = cluster_similar_rows(rows, km, brand_regexes)
+        progress_callback(74, f"Agrupando noticias similares… 0/{n_active} notas")
+    cluster_map = cluster_similar_rows(
+        rows, km, brand_regexes, progress_callback=progress_callback, progress_pct=74
+    )
     
     unique_clusters = sorted(set(cluster_map.values()))
     total_clusters = len(unique_clusters)
@@ -1106,12 +1202,31 @@ def enrich_rows_with_ai(
     for row_idx, cid in cluster_map.items():
         if cid not in cluster_to_sample_idx:
             cluster_to_sample_idx[cid] = row_idx
+
+    ordered_cids = list(cluster_to_sample_idx.keys())
+    sample_texts = [rows[cluster_to_sample_idx[cid]].get("Contexto analizado") or "" for cid in ordered_cids]
+    cluster_pkl: Dict[int, Tuple[Optional[str], Optional[str]]] = {
+        cid: (None, None) for cid in ordered_cids
+    }
+    if tone_model is not None or theme_model is not None:
+        if progress_callback:
+            progress_callback(
+                75,
+                f"Temas listos: {total_clusters} hechos únicos de {n_active} notas. Clasificando PKL en lote…",
+            )
+        cluster_pkl = _batch_pkl_labels_for_clusters(
+            ordered_cids, sample_texts, tone_model, theme_model, progress_callback
+        )
+    elif progress_callback:
+        progress_callback(
+            76,
+            f"Temas listos: {total_clusters} hechos únicos de {n_active} notas. Iniciando etiquetado…",
+        )
             
     cluster_results: Dict[int, Tuple[str, str, str]] = {}
-    cluster_pkl: Dict[int, Tuple[Optional[str], Optional[str]]] = {}
 
     if progress_callback:
-        progress_callback(77, f"Analizando {total_clusters} hechos únicos con {model}…")
+        progress_callback(77, f"Etiquetando con {model}… 0/{total_clusters} hechos")
         
     completed = 0
     with ThreadPoolExecutor(max_workers=14) as executor:
@@ -1119,13 +1234,7 @@ def enrich_rows_with_ai(
         for cid, row_idx in cluster_to_sample_idx.items():
             ctx = rows[row_idx]["Contexto analizado"]
             t_ref = str(rows[row_idx].get(km.get("titulo", "Título"), ""))
-            pkl_tone = None
-            pkl_theme = None
-            if tone_model is not None:
-                pkl_tone = map_tone_label(_safe_predict(tone_model, [ctx or ""], "tono")[0])
-            if theme_model is not None:
-                pkl_theme = format_theme_label(_safe_predict(theme_model, [ctx or ""], "tema")[0])
-            cluster_pkl[cid] = (pkl_tone, pkl_theme)
+            pkl_tone, pkl_theme = cluster_pkl.get(cid, (None, None))
             fut = executor.submit(
                 _call_openai_cluster,
                 client,
@@ -1159,9 +1268,11 @@ def enrich_rows_with_ai(
                 )
             cluster_results[cid] = (tono, tema, subtema)
             completed += 1
-            if progress_callback and (completed % 15 == 0 or completed == total_clusters):
-                pct = 77 + int((completed / total_clusters) * 16)
-                progress_callback(pct, f"Analizando con IA… {completed}/{total_clusters} procesados")
+            if progress_callback and (
+                completed == 1 or completed % 5 == 0 or completed == total_clusters
+            ):
+                pct = 77 + int((completed / total_clusters) * 16) if total_clusters else 93
+                progress_callback(pct, f"Etiquetando con IA… {completed}/{total_clusters} hechos")
 
     cluster_results = canonicalize_subtopics(cluster_results)
 

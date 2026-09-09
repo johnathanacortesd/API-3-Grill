@@ -276,7 +276,8 @@ PIPELINE_STEPS = [
     ("read", "Leer el Excel"),
     ("norm", "Limpiar y normalizar"),
     ("dups", "Menciones y duplicadas"),
-    ("ai", "Análisis IA (Tono, Tema, Subtema)"),
+    ("group", "Agrupar noticias similares"),
+    ("label", "Etiquetado tono, tema y subtema"),
     ("export", "Generar archivo de resultado"),
 ]
 
@@ -293,17 +294,28 @@ def _fmt_size(n_bytes: int) -> str:
     return f"{mb:.1f} MB"
 
 def _active_step(pct: int, msg: str) -> str:
-    if pct >= 100 or "completad" in msg.lower():
+    ml = (msg or "").lower()
+    if pct >= 100 or "completad" in ml:
         return "done"
-    if pct >= 94 or "Generando archivo" in msg or "Guardando" in msg:
+    if pct >= 94 or "generando archivo" in ml or "guardando" in ml:
         return "export"
-    if pct >= 70 or "IA" in msg or "Analizando" in msg or "semántica" in msg:
-        return "ai"
-    if pct >= 55 or "duplicad" in msg.lower() or "Expandiendo" in msg:
+    if (
+        pct >= 77
+        or "etiquet" in ml
+        or "analizando" in ml
+        or "clasificando" in ml
+        or "hechos únicos" in ml
+        or "pkl" in ml
+        or "temas listos" in ml
+    ):
+        return "label"
+    if pct >= 70 or "agrupando" in ml or "contexto" in ml or "preparando textos" in ml:
+        return "group"
+    if pct >= 55 or "duplicad" in ml or "expandiendo" in ml:
         return "dups"
-    if pct >= 40 or "Normaliz" in msg or "Columnas" in msg:
+    if pct >= 40 or "normaliz" in ml or "columnas" in ml:
         return "norm"
-    if pct >= 8 or "Excel" in msg or "Leyendo" in msg:
+    if pct >= 8 or "excel" in ml or "leyendo" in ml:
         return "read"
     return "config"
 
@@ -325,6 +337,13 @@ def _render_live_html(pct, msg, elapsed, file_label, active_key):
     file_line = f" · {html.escape(file_label)}" if file_label else ""
     title = "Limpieza completada" if active_key == "done" else "Procesando dossier de noticias"
     safe_msg = html.escape(str(msg or ""))
+    if active_key == "group":
+        hint = "Agrupando notas parecidas para no etiquetar dos veces el mismo hecho. El avance se actualiza por lote."
+    elif active_key == "label":
+        hint = "El etiquetado (IA y/o PKL) corre sobre hechos únicos, no sobre cada fila. No cierres la pestaña."
+    else:
+        hint = "La deduplicación previa agrupa notas idénticas para procesar hasta 2.000 filas con alta velocidad."
+    hint = html.escape(hint)
     
     return f"""
     <div class="live-panel">
@@ -341,7 +360,7 @@ def _render_live_html(pct, msg, elapsed, file_label, active_key):
         <div class="live-metric"><div class="live-metric-val">en curso</div><div class="live-metric-lbl">Estado</div></div>
       </div>
       <div class="step-list">{''.join(steps_html)}</div>
-      <div class="live-hint">La deduplicación previa agrupa notas idénticas para procesar hasta 2.000 filas con alta velocidad.</div>
+      <div class="live-hint">{hint}</div>
       <div class="live-detail">{safe_msg}</div>
     </div>
     """
