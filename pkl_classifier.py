@@ -246,13 +246,7 @@ def apply_pkl_classifiers(
         if progress_callback:
             progress_callback(min(93, 88), f"Agrupando noticias similares para PKL… {len(active)} notas")
         cluster_map = cluster_similar_rows(
-            rows,
-            km,
-            regexes,
-            progress_callback=progress_callback,
-            progress_pct=88,
-            brand=brand,
-            aliases=list(aliases or []),
+            rows, km, regexes, progress_callback=progress_callback, progress_pct=88
         )
     else:
         cluster_map = {i: i for i in active}
