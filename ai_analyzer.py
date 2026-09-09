@@ -76,6 +76,7 @@ EVENT_FACT_TOKENS = {
     "feria", "congreso", "premio", "award", "awards", "patrimonio", "matricula",
     "inscripcion", "catedra", "beca", "becas", "diplomado", "foro", "simposio",
     "festival", "convocatoria", "inauguracion", "sede", "cine", "conversatorio",
+    "alianza", "convenio",
 }
 
 FACT_ANCHORS = INST_HEADS | DEGREE_LEMMAS | {
@@ -282,6 +283,8 @@ def subtema_supported_by_context(
     """True when the subtema’s fact words are present in THIS contexto (not another story)."""
     if not subtema or not ctx or str(ctx).strip() in ("", "-", "nan", "None"):
         return False
+    if _is_institution_name_chain(subtema, brand):
+        return False
     facts = _subtema_fact_tokens(subtema, brand, aliases)
     if not facts:
         return False
@@ -296,6 +299,31 @@ def subtema_supported_by_context(
         return True
     # Template educational noun phrases (formación académica…) are entailed by degree/egreso cues.
     return facts <= {"formacion", "academica", "academico", "actividad"}
+
+
+def _subtema_compatible_with_story(
+    subtema: str,
+    story: str,
+    brand: str,
+    aliases: Optional[List[str]] = None,
+) -> bool:
+    """Per-row backup: keep cluster labels unless this note is a different event."""
+    if _is_institution_name_chain(subtema, brand):
+        return False
+    if not subtema or not story or str(story).strip() in ("", "-", "nan", "None"):
+        return False
+    facts = _subtema_fact_tokens(subtema, brand, aliases)
+    if not facts:
+        return False
+    story_toks = get_content_words_set(normalize_text_for_matching(story))
+    sub_events = facts & EVENT_FACT_TOKENS
+    if sub_events and (story_toks & EVENT_FACT_TOKENS) and not any(
+        _token_in_context(t, story_toks) for t in sub_events
+    ):
+        return False
+    if facts and not any(_token_in_context(t, story_toks) for t in facts):
+        return False
+    return True
 
 
 def extract_event_anchor(title_raw: str) -> str:
@@ -556,6 +584,8 @@ def _normalize_subtema_phrase(text: str, brand: str, tema: str = "") -> str:
         return ""
     if _is_brand_restatement(res, brand):
         return ""
+    if _is_institution_name_chain(res, brand):
+        return ""
     if unidecode(res.lower()) in {
         "universidad", "autonoma", "fundacion", "clinica", "hospital",
         "institucion", "asociacion", "mencion", "entrevista", "noticia",
@@ -599,6 +629,8 @@ def _complete_proper_names_from_context(phrase: str, ctx: str) -> str:
     if not phrase or not ctx:
         return phrase
     pwords = phrase.split()
+    if pwords and unidecode(pwords[-1].lower()) in CITY_TAILS:
+        return phrase
     cwords = _tokenize_phrase_words(ctx)
     if not pwords or not cwords:
         return phrase
@@ -677,6 +709,43 @@ def _is_lead_clause_scrap(words: List[str]) -> bool:
     return False
 
 
+def _story_text(title: str, ctx: str) -> str:
+    """Title + contexto of THIS note; the fact often lives in the titular."""
+    t = str(title or "").strip()
+    c = str(ctx or "").strip()
+    if c in ("", "-", "nan", "None"):
+        return t
+    if t and t.lower() not in c.lower():
+        return f"{t}. {c}"
+    return c or t
+
+
+def _is_inst_marker_token(tok: str) -> bool:
+    if tok in INST_HEADS:
+        return True
+    prefixes = {unidecode(p) for p in INSTITUTIONAL_PREFIXES}
+    if tok in prefixes:
+        return True
+    return tok.startswith("universit")
+
+
+def _is_institution_name_chain(phrase: str, brand: str) -> bool:
+    """True for 'Libre seccional Cartagena la Fundación Universitaria Minuto' — org list, no event."""
+    if not phrase:
+        return False
+    toks = _content_token_set(phrase)
+    toks -= brand_content_tokens(brand)
+    if toks & EVENT_FACT_TOKENS:
+        return False
+    inst_n = sum(1 for t in toks if _is_inst_marker_token(t))
+    glue = toks & {"seccional", "filial", "seccion"}
+    if inst_n >= 2:
+        return True
+    if inst_n >= 1 and glue:
+        return True
+    return False
+
+
 def _is_strong_subtema(phrase: str, tema: str, title: str, brand: str) -> bool:
     if not phrase:
         return False
@@ -688,6 +757,8 @@ def _is_strong_subtema(phrase: str, tema: str, title: str, brand: str) -> bool:
     if _is_lead_clause_scrap(words):
         return False
     if _is_brand_restatement(phrase, brand):
+        return False
+    if _is_institution_name_chain(phrase, brand):
         return False
     if _labels_too_close(tema, phrase):
         return False
@@ -705,7 +776,8 @@ def _is_strong_subtema(phrase: str, tema: str, title: str, brand: str) -> bool:
     brand_words = set(re.findall(r"\b[a-z0-9]+\b", unidecode(brand.lower())))
     if frase_toks and frase_toks.issubset(brand_words):
         return False
-    if _is_title_scrap(phrase, title):
+    # Event-named titles ("Feria Educativa Inspírate…") are the fact, not scrap.
+    if _is_title_scrap(phrase, title) and not (_content_token_set(phrase) & EVENT_FACT_TOKENS):
         return False
     return True
 
@@ -800,6 +872,8 @@ def _score_subtema_window(words: List[str], tema: str, title: str, brand: str, a
     if _has_echoed_content_pair(words):
         return -110
     phrase = " ".join(words)
+    if _is_institution_name_chain(phrase, brand):
+        return -100
     if _is_brand_restatement(phrase, brand):
         return -90
     low = unidecode(phrase.lower())
@@ -819,16 +893,30 @@ def _score_subtema_window(words: List[str], tema: str, title: str, brand: str, a
         return -45
     bleed = {unidecode(t) for t in PKL_TEMA_BLEED_TOKENS}
     bleed_n = sum(1 for t in phrase_toks if t in bleed)
-    title_pen = 30 if _is_title_scrap(phrase, title) else 0
+    event_in_phrase = bool(phrase_toks & EVENT_FACT_TOKENS)
+    title_pen = 30 if _is_title_scrap(phrase, title) and not event_in_phrase else 0
     noun_bonus = 0
+    title_toks = get_content_words_set(normalize_text_for_matching(title))
+    title_events = title_toks & EVENT_FACT_TOKENS
+    lead_events = set(get_lead_content_words(normalize_text_for_matching(title), n_words=4)) & EVENT_FACT_TOKENS
+    if phrase_toks & title_events:
+        noun_bonus += 28
+    if lead_events and not (phrase_toks & lead_events):
+        noun_bonus -= 55
+    shared_dist = phrase_toks & _distinctive_story_tokens(title_toks)
+    if shared_dist:
+        noun_bonus += 8 * min(3, len(shared_dist))
+    inst_bonus = 4 if lead_events else 18
     for w in content:
         wl = unidecode(w.lower())
         if wl.endswith(("cion", "sion", "miento", "dad", "aje", "ncia", "encia", "ura", "azgo")):
             noun_bonus += 8
         if wl in EVENT_FACT_TOKENS:
             noun_bonus += 22
-        elif wl in FACT_ANCHORS or wl in INST_HEADS or wl in DEGREE_LEMMAS:
+        elif wl in FACT_ANCHORS or wl in DEGREE_LEMMAS:
             noun_bonus += 18
+        elif wl in INST_HEADS:
+            noun_bonus += inst_bonus
     start = unidecode(words[0].lower())
     start_pen = -25 if start in DISCOURSE_STARTERS else (-8 if start in STOPWORDS_ES else 6)
     lead_pen = 40 if at_sentence_start and start in DISCOURSE_STARTERS else 0
@@ -857,8 +945,16 @@ def _score_subtema_window(words: List[str], tema: str, title: str, brand: str, a
 
 
 def _noun_phrase_from_context(ctx: str, tema: str, title: str, brand: str) -> str:
-    """Build a fact noun phrase from contexto; never return a lead-clause scrap."""
-    text = str(ctx or "").strip()
+    """Build a fact noun phrase from THIS note; never a lead-clause scrap.
+
+    If the contexto already names an event, stay inside it (cine ≠ title-only
+    crop). If it is only a participant list, the fact often lives in the titular.
+    """
+    ctx_clean = str(ctx or "").strip()
+    if _context_has_event_fact(ctx_clean):
+        text = ctx_clean
+    else:
+        text = _story_text(title, ctx_clean)
     if not text or text == "-":
         return ""
     edu = _education_fact_phrase(text, brand)
@@ -883,6 +979,8 @@ def _noun_phrase_from_context(ctx: str, tema: str, title: str, brand: str) -> st
     for n in range(MAX_SUBTEMA_WORDS, MIN_SUBTEMA_WORDS - 1, -1):
         for i in range(0, len(words) - n + 1):
             window = words[i:i + n]
+            if _is_institution_name_chain(" ".join(window), brand):
+                continue
             at_start = [unidecode(w.lower()) for w in window[:2]] == orig_lead[:2]
             score = _score_subtema_window(window, tema, title, brand, at_sentence_start=at_start)
             if score > best_score:
@@ -1148,9 +1246,34 @@ def _titles_are_same_story(
     if anchor and rep_anchor and len(anchor) >= 12 and anchor == rep_anchor:
         if _distinctive_story_tokens(get_content_words_set(anchor)):
             return True
+    # One title uses a colon ("Feria Educativa Inspírate: …"); the other starts
+    # with that same event name and a different suffix.
+    for a, other in ((anchor, rep_story), (rep_anchor, t_story)):
+        if (
+            a
+            and other
+            and len(a) >= 12
+            and _distinctive_story_tokens(get_content_words_set(a))
+            and (other.startswith(a) or f" {a} " in f" {other} ")
+        ):
+            return True
 
     lead_dist = _distinctive_story_tokens(lead_words) | _distinctive_story_tokens(rep_lead)
     if len(lead_words) >= 3 and len(rep_lead) >= 3 and lead_words == rep_lead and lead_dist:
+        return True
+    # Shared distinctive 3-word stem anywhere in the other title (A→Z neighbors
+    # with suffix drift: "…Inspírate 2026 impulsa…" vs "…Inspírate: 10 universidades…").
+    def _lead_stem_in(story: str, lead: Tuple[str, ...]) -> bool:
+        if len(lead) < 3 or not story:
+            return False
+        stem = " ".join(lead[:3])
+        if len(stem) < 18:
+            return False
+        if not _distinctive_story_tokens(lead[:3]):
+            return False
+        return stem in story
+
+    if _lead_stem_in(rep_story, lead_words) or _lead_stem_in(t_story, rep_lead):
         return True
 
     if len(lead_words) >= 2 and len(rep_lead) >= 2 and lead_words[:2] == rep_lead[:2]:
@@ -1291,19 +1414,20 @@ def ensure_subtema_distinct_from_tema(
     ctx: str,
     aliases: Optional[List[str]] = None,
 ) -> str:
-    """Keep a 4–7 word fact noun phrase from THIS contexto, distinct from the PKL tema."""
+    """Keep a 4–7 word fact noun phrase from THIS note (title + contexto), distinct from the PKL tema."""
+    story = _story_text(title, ctx)
     llm_clean = clean_subtema_specific(subtema or "", brand, tema)
     if llm_clean:
-        llm_clean = _complete_proper_names_from_context(llm_clean, ctx)
+        llm_clean = _complete_proper_names_from_context(llm_clean, story)
         llm_clean = _normalize_subtema_phrase(llm_clean, brand, tema)
-    if llm_clean and not subtema_supported_by_context(llm_clean, ctx, brand, aliases):
+    if llm_clean and not subtema_supported_by_context(llm_clean, story, brand, aliases):
         llm_clean = ""
 
     ctx_phrase = _noun_phrase_from_context(ctx, tema, title, brand)
     if ctx_phrase:
-        ctx_phrase = _complete_proper_names_from_context(ctx_phrase, ctx)
+        ctx_phrase = _complete_proper_names_from_context(ctx_phrase, story)
         ctx_phrase = _normalize_subtema_phrase(ctx_phrase, brand, tema)
-    if ctx_phrase and not subtema_supported_by_context(ctx_phrase, ctx, brand, aliases):
+    if ctx_phrase and not subtema_supported_by_context(ctx_phrase, story, brand, aliases):
         ctx_phrase = ""
 
     if llm_clean and _is_strong_subtema(llm_clean, tema, title, brand):
@@ -1365,7 +1489,9 @@ def _call_openai_cluster(
         "no la cláusula inicial ni el solo nombre de la marca. "
         'Sin comas ni puntos. PROHIBIDO "Mención", collage, recortar el titular o copiar el tema. '
         'PROHIBIDO repetir la misma palabra de contenido (MAL: "Beneficios y beneficios académicos"). '
-        'PROHIBIDO un subtema que solo nombra al cliente (MAL: "Participación de la universidad…").'
+        'PROHIBIDO un subtema que solo nombra al cliente (MAL: "Participación de la universidad…"). '
+        "PROHIBIDO encadenar nombres de instituciones participantes sin el hecho "
+        "(feria, cátedra, alianza, becas); el subtema nombra el evento, no el listado."
     )
     steps.append(subtema_rule)
     json_fields.append('"subtema": "..."')
@@ -1597,7 +1723,8 @@ def enrich_rows_with_ai(
 
         row_ctx = row.get("Contexto analizado", "")
         row_title = str(row.get(km.get("titulo", "Título"), ""))
-        if not subtema_supported_by_context(subtema, row_ctx, brand, aliases):
+        row_story = _story_text(row_title, row_ctx)
+        if not _subtema_compatible_with_story(subtema, row_story, brand, aliases):
             subtema = ensure_subtema_distinct_from_tema(
                 tema, "", brand, row_title, row_ctx, aliases
             )

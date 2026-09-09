@@ -6,6 +6,8 @@ import sys
 import unittest
 from unittest.mock import patch
 
+from unidecode import unidecode
+
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
@@ -370,6 +372,71 @@ class ContextGroundingTests(unittest.TestCase):
         self.assertNotIn("matrícula", low)
         self.assertNotIn("matricula", low)
         self.assertTrue("ficci" in low or "catedra" in low or "cátedra" in low or "cine" in low)
+
+
+INSPIRATE_TITLES = [
+    "Feria Educativa Inspírate 2026 impulsa el acceso a la educación superior en Cartagena",
+    "Feria Educativa Inspírate: 10 universidades presentarán su oferta académica",
+    "Feria Educativa Inspírate: 10 universidades presentarán su oferta académica",
+    "Feria Educativa Inspírate: 3 días con becas, descuentos e inscripciones gratis",
+    "Feria Educativa Inspírate: 3 días con becas, descuentos e inscripciones gratis",
+]
+# Brand mention lives in the participant list; the feria fact lives in the titular.
+INSPIRATE_PARTICIPANT_CTX = (
+    "En el recinto participan la Universidad Libre seccional Cartagena, "
+    "la Fundación Universitaria Minuto de Dios, la Institución Universitaria "
+    "Bellas Artes y la Universidad Tecnológica de Bolívar."
+)
+
+
+class InspirateSameStoryTests(unittest.TestCase):
+    def test_inspirate_title_variants_share_grupo(self):
+        rows = [_row(t, INSPIRATE_PARTICIPANT_CTX) for t in INSPIRATE_TITLES]
+        rx = generate_brand_variants(BRAND, ALIASES)
+        cm = cluster_similar_rows(rows, KM, rx, brand=BRAND, aliases=ALIASES)
+        self.assertEqual(len(set(cm.values())), 1, f"Inspírate variants must be one grupo, got {cm}")
+
+    def test_inspirate_title_family_shares_feria_subtema_not_university_scrap(self):
+        rows = [_row(t, INSPIRATE_PARTICIPANT_CTX) for t in INSPIRATE_TITLES]
+        with patch("ai_analyzer.OpenAI"):
+            with patch("ai_analyzer._call_openai_cluster") as mock_llm:
+                mock_llm.return_value = (
+                    "Neutro",
+                    "Educación Superior",
+                    "Libre seccional cartagena la fundación universitaria minuto",
+                )
+                out = enrich_rows_with_ai(rows, KM, BRAND, ALIASES, "sk-test")
+
+        subs = [r["Subtema_IA"] for r in out]
+        self.assertEqual(len(set(subs)), 1, f"same story must share one subtema, got {subs}")
+        self.assertEqual(len({r["Tema_IA"] for r in out}), 1)
+        self.assertEqual(len({r["Tono_IA"] for r in out}), 1)
+
+        low = unidecode(subs[0].strip().lower())
+        self.assertGreaterEqual(len(subs[0].split()), 4)
+        self.assertLessEqual(len(subs[0].split()), 7)
+        self.assertTrue(
+            any(k in low for k in ("feria", "inspirate", "beca", "oferta")),
+            f"subtema must name the feria/becas/oferta, got {subs[0]!r}",
+        )
+        for bad in ("uniminuto", "minuto", "bellas", "matricula"):
+            self.assertNotRegex(low, rf"\b{bad}\b", f"scrap token {bad!r} in {subs[0]!r}")
+        self.assertNotRegex(low, r"\blibre\b", f"must not lift Univ Libre, got {subs[0]!r}")
+
+        scrap = ensure_subtema_distinct_from_tema(
+            "Educación Superior",
+            "Univ libre seccional cartagena institución universitaria bellas",
+            BRAND,
+            INSPIRATE_TITLES[0],
+            INSPIRATE_PARTICIPANT_CTX,
+            ALIASES,
+        )
+        scrap_low = unidecode(scrap.strip().lower())
+        self.assertTrue(
+            any(k in scrap_low for k in ("feria", "inspirate", "beca", "oferta")),
+            f"fallback must ground in the feria, got {scrap!r}",
+        )
+        self.assertNotRegex(scrap_low, r"\b(uniminuto|minuto|bellas|matricula|libre)\b")
 
 
 if __name__ == "__main__":
