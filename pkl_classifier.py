@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Optional, Sequence
 import joblib
 import numpy as np
 
-from ai_analyzer import cluster_similar_rows, extract_brand_context, generate_brand_variants, build_brand_context
+from ai_analyzer import cluster_similar_rows, extract_brand_context, generate_brand_variants
 
 logger = logging.getLogger("pkl_classifier")
 
@@ -232,15 +232,7 @@ def apply_pkl_classifiers(
             row.setdefault("Contexto analizado", "-")
             continue
         if not row.get("Contexto analizado"):
-            ctx = build_brand_context(
-                str(row.get(km.get("titulo", "Título"), "")),
-                str(row.get("Resumen - Aclaracion") or row.get("resumen corto") or ""),
-                brand,
-                aliases,
-            )
-            row["_brand_presence"] = ctx["presence"]
-            row["Contexto analizado"] = ctx["text"] or text_for_classification(row, km) or "-"
-            row["Relación con la marca"] = "Presente" if ctx["presence"] == "present" else "Sin mención"
+            row["Contexto analizado"] = text_for_classification(row, km) or "-"
         row.setdefault("Subtema_IA", "-")
         row.setdefault("Tono_IA", "-")
         row.setdefault("Tema_IA", "-")
@@ -268,19 +260,21 @@ def apply_pkl_classifiers(
 
     if tone_model is not None:
         if progress_callback:
-            progress_callback(min(93, 88), "Clasificando tono por fila y marca…")
-        row_texts = [text_for_classification(rows[i], km) or "" for i in active]
-        preds = _safe_predict(tone_model, row_texts, "tono")
-        for idx, pred in zip(active, preds):
-            rows[idx]["Tono_IA"] = map_tone_label(pred)
+            progress_callback(min(93, 88), "Clasificando tono con modelo PKL del cliente…")
+        preds = _safe_predict(tone_model, rep_texts, "tono")
+        for cid, pred in zip(ordered_cids, preds):
+            label = map_tone_label(pred)
+            for idx in members[cid]:
+                rows[idx]["Tono_IA"] = label
 
     if theme_model is not None:
         if progress_callback:
-            progress_callback(min(93, 90), "Clasificando tema por fila…")
-        row_texts = [text_for_classification(rows[i], km) or "" for i in active]
-        preds = _safe_predict(theme_model, row_texts, "tema")
-        for idx, pred in zip(active, preds):
-            rows[idx]["Tema_IA"] = format_theme_label(pred) or rows[idx].get("Tema_IA") or "-"
+            progress_callback(min(93, 90), "Clasificando tema con modelo PKL del cliente…")
+        preds = _safe_predict(theme_model, rep_texts, "tema")
+        for cid, pred in zip(ordered_cids, preds):
+            label = format_theme_label(pred) or rows[reps[cid]].get("Tema_IA") or "-"
+            for idx in members[cid]:
+                rows[idx]["Tema_IA"] = label
 
     return rows
 
