@@ -22,6 +22,7 @@ from ai_analyzer import (
     enrich_rows_with_ai,
     ensure_subtema_distinct_from_tema,
     generate_brand_variants,
+    subtema_supported_by_context,
     _has_echoed_content_pair,
 )
 from pipeline import KEY_MAP
@@ -120,8 +121,9 @@ class NearSimilarClusteringTests(unittest.TestCase):
         ]
         rx = generate_brand_variants(BRAND, ALIASES)
         cm = cluster_similar_rows(rows, KM, rx, brand=BRAND, aliases=ALIASES)
+        # Same SIAB/Quindío *story* titles share a grupo. A brand-only Quindío
+        # title is not a near-duplicate and must not steal another fact's label.
         self.assertEqual(cm[0], cm[1])
-        self.assertEqual(cm[0], cm[2])
         self.assertEqual(cm[0], cm[3])
         self.assertNotEqual(cm[0], cm[4])
 
@@ -264,6 +266,110 @@ class BrandCentricTonoTests(unittest.TestCase):
             f"{BRAND} celebra y respalda el nombramiento y participaron otras universidades."
         )
         self.assertFalse(check_list_mention_neutral(praise, BRAND, ALIASES))
+
+
+FICCI_CINE_CTX = (
+    "Cartagena, cine y memoria: así comienza la nueva cátedra FICCI-UTB. "
+    "El lanzamiento será este lunes 7 de septiembre con el conversatorio "
+    '"La Cartagena de Quemada: cine, memoria y ciudad" La Universidad Tecnológica de Bolívar '
+    "y el Festival Internacional de Cine de Cartagena de Indias (FICCI) presentan la Cátedra FICCI-UTB."
+)
+MATRICULA_CTX = (
+    "La Universidad Tecnológica de Bolívar en Cartagena presenta un incremento en matrícula "
+    "universitaria. El nuevo semestre en la ciudad recibe más estudiantes de la institución "
+    "este 7 de septiembre con un lanzamiento de cifras académicas en pregrado."
+)
+
+
+class ContextGroundingTests(unittest.TestCase):
+    def test_ficci_cine_never_gets_matricula_subtema(self):
+        title = "Cartagena, cine y memoria: así comienza la nueva cátedra FICCI-UTB"
+        sub = ensure_subtema_distinct_from_tema(
+            "Educación Superior",
+            "Incremento en matrícula universitaria en cartagena",
+            BRAND,
+            title,
+            FICCI_CINE_CTX,
+            ALIASES,
+        )
+        low = sub.strip().lower()
+        self.assertNotIn("matrícula", low)
+        self.assertNotIn("matricula", low)
+        self.assertNotIn("beca", low)
+        self.assertNotIn("inscrip", low)
+        self.assertGreaterEqual(len(sub.split()), 4)
+        self.assertLessEqual(len(sub.split()), 7)
+        self.assertTrue(
+            "ficci" in low or "cátedra" in low or "catedra" in low or "cine" in low,
+            f"FICCI cine contexto must keep a cine/cátedra subtema, got {sub!r}",
+        )
+        self.assertTrue(subtema_supported_by_context(sub, FICCI_CINE_CTX, BRAND, ALIASES))
+
+    def test_shared_brand_city_does_not_share_subtema(self):
+        rows = [
+            _row(
+                "Cartagena, cine y memoria: así comienza la nueva cátedra FICCI-UTB",
+                FICCI_CINE_CTX,
+            ),
+            _row("Incremento en matrícula universitaria en Cartagena", MATRICULA_CTX),
+            _row("UTB registra aumento de matrícula en Cartagena", MATRICULA_CTX),
+        ]
+        rx = generate_brand_variants(BRAND, ALIASES)
+        cm = cluster_similar_rows(rows, KM, rx, brand=BRAND, aliases=ALIASES)
+        self.assertNotEqual(cm[0], cm[1], "FICCI cine must not share grupo with matrícula")
+        self.assertNotEqual(cm[0], cm[2])
+
+        with patch("ai_analyzer.OpenAI"):
+            with patch("ai_analyzer._call_openai_cluster") as mock_llm:
+                def _fake(*args, **kwargs):
+                    title = str(kwargs.get("title_ref") or (args[6] if len(args) > 6 else ""))
+                    ctx = str(kwargs.get("ctx") or (args[5] if len(args) > 5 else ""))
+                    blob = f"{title} {ctx}".lower()
+                    if "ficci" in blob or "cine" in blob or "cátedra" in blob or "catedra" in blob:
+                        return ("Neutro", "Cultura", "Cátedra FICCI cine y memoria")
+                    return ("Positivo", "Educación Superior", "Incremento en matrícula universitaria en cartagena")
+
+                mock_llm.side_effect = _fake
+                out = enrich_rows_with_ai(rows, KM, BRAND, ALIASES, "sk-test")
+        ficci_sub = out[0]["Subtema_IA"].lower()
+        mat_sub = out[1]["Subtema_IA"].lower()
+        self.assertNotEqual(out[0]["Subtema_IA"], out[1]["Subtema_IA"])
+        self.assertNotIn("matrícula", ficci_sub)
+        self.assertNotIn("matricula", ficci_sub)
+        self.assertTrue("ficci" in ficci_sub or "catedra" in ficci_sub or "cátedra" in ficci_sub or "cine" in ficci_sub)
+        self.assertTrue(
+            subtema_supported_by_context(out[0]["Subtema_IA"], FICCI_CINE_CTX, BRAND, ALIASES)
+        )
+        self.assertFalse(
+            subtema_supported_by_context(
+                "Incremento en matrícula universitaria en cartagena",
+                FICCI_CINE_CTX,
+                BRAND,
+                ALIASES,
+            )
+        )
+        # Wrong cluster-rep subtema must be rejected against this contexto.
+        self.assertNotEqual(ficci_sub, mat_sub)
+
+    def test_broadcast_rejects_foreign_subtema_for_this_contexto(self):
+        rows = [
+            _row(
+                "Cartagena, cine y memoria: así comienza la nueva cátedra FICCI-UTB",
+                FICCI_CINE_CTX,
+            ),
+        ]
+        with patch("ai_analyzer.OpenAI"):
+            with patch("ai_analyzer._call_openai_cluster") as mock_llm:
+                mock_llm.return_value = (
+                    "Positivo",
+                    "Educación Superior",
+                    "Incremento en matrícula universitaria en cartagena",
+                )
+                out = enrich_rows_with_ai(rows, KM, BRAND, ALIASES, "sk-test")
+        low = out[0]["Subtema_IA"].lower()
+        self.assertNotIn("matrícula", low)
+        self.assertNotIn("matricula", low)
+        self.assertTrue("ficci" in low or "catedra" in low or "cátedra" in low or "cine" in low)
 
 
 if __name__ == "__main__":
