@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Optional, Sequence
 import joblib
 import numpy as np
 
-from ai_analyzer import cluster_similar_rows, extract_brand_context, generate_brand_variants
+from ai_analyzer import cluster_similar_rows, extract_brand_context, generate_brand_variants, build_brand_context
 
 logger = logging.getLogger("pkl_classifier")
 
@@ -232,7 +232,15 @@ def apply_pkl_classifiers(
             row.setdefault("Contexto analizado", "-")
             continue
         if not row.get("Contexto analizado"):
-            row["Contexto analizado"] = text_for_classification(row, km) or "-"
+            ctx = build_brand_context(
+                str(row.get(km.get("titulo", "Título"), "")),
+                str(row.get("Resumen - Aclaracion") or row.get("resumen corto") or ""),
+                brand,
+                aliases,
+            )
+            row["_brand_presence"] = ctx["presence"]
+            row["Contexto analizado"] = ctx["text"] or text_for_classification(row, km) or "-"
+            row["Relación con la marca"] = "Presente" if ctx["presence"] == "present" else "Sin mención"
         row.setdefault("Subtema_IA", "-")
         row.setdefault("Tono_IA", "-")
         row.setdefault("Tema_IA", "-")
