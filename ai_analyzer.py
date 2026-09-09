@@ -191,20 +191,10 @@ def generate_brand_variants(brand: str, aliases: List[str]) -> List[str]:
             variants_set.add(r"\b" + r"\.?\s*".join(list(base)) + r"\.?\b")
             continue
 
-        if "santa fe" in base:
-            variants_set.add(base.replace("santa fe", "santafe"))
-            variants_set.add("santa fe")
-            variants_set.add("santafe")
-            variants_set.add("clinica santa fe")
-            variants_set.add("hospital santa fe")
-            variants_set.add("fundacion santa fe")
-
-        if "serena del mar" in base:
-            variants_set.add("serena")
-            variants_set.add("hospital serena")
-            variants_set.add("hospital serena del mar")
-            variants_set.add("clinica serena")
-            variants_set.add("clinica serena del mar")
+        if " " in base:
+            compact = base.replace(" ", "")
+            if len(compact) >= 6:
+                variants_set.add(compact)
 
         for prefix in ["fundacion", "clinica", "hospital", "universidad", "instituto", "asociacion"]:
             if base.startswith(prefix + " "):
@@ -749,11 +739,15 @@ def clean_subtema_specific(text: str, brand: str, tema: str = "") -> str:
     """PKL-tema path: never collapse to a title scrap or a 1–2 word leftover."""
     return _normalize_subtema_phrase(text, brand, tema)
 
+MAX_TEMA_WORDS = 5
+
 def clean_tema(text: str) -> str:
     if not text:
         return "Gestión Institucional"
     clean = re.sub(r'[,.;:!?¿¡"\'\(\)\[\]\{\}\-_/\\|]', ' ', str(text)).strip()
-    words = clean.split()[:4]
+    words = clean.split()[:MAX_TEMA_WORDS]
+    while words and words[-1].lower() in FORBIDDEN_TRAILING_WORDS:
+        words.pop()
     res = " ".join(words).title()
     if res.lower() in ["otros", "otro", "general", "varios", "miscelanea", "sin clasificar", ""]:
         return "Gestión Institucional"
@@ -764,12 +758,12 @@ def ensure_different_tema_subtema(tema: str, subtema: str, ctx: str) -> str:
     s_clean = subtema.strip().capitalize()
     
     if t_clean.lower() == s_clean.lower() or fuzz.ratio(t_clean.lower(), s_clean.lower()) >= 80:
-        c_low = f"{s_clean} {ctx}".lower()
-        if any(w in c_low for w in ["salud", "hospital", "clinica", "medico", "medicina", "paciente", "quirurg", "enfermedad", "achc"]):
+        c_low = unidecode(f"{s_clean} {ctx}".lower())
+        if any(w in c_low for w in ["salud", "hospital", "clinica", "medico", "medicina", "paciente", "quirurg", "enfermedad"]):
             return "Sector Salud"
         if any(w in c_low for w in ["aduan", "dian", "fiscal", "tributar", "impuesto", "arancel"]):
             return "Gestión Tributaria"
-        if any(w in c_low for w in ["universidad", "estudiante", "academ", "carrera", "educacion", "profesor", "beca", "uao", "feria", "inspirate"]):
+        if any(w in c_low for w in ["universidad", "estudiante", "academ", "carrera", "educacion", "profesor", "beca", "feria"]):
             return "Educación Superior"
         if any(w in c_low for w in ["aniversario", "celebracion", "decadas", "anos", "reconocimiento", "homenaje"]):
             return "Hitos y Aniversarios"
@@ -785,9 +779,21 @@ def ensure_different_tema_subtema(tema: str, subtema: str, ctx: str) -> str:
         
     return t_clean
 
-def check_positive_institutional_override(ctx: str) -> bool:
-    """Detecta de forma infalible acompañamiento, respaldo y felicitaciones."""
+def check_positive_institutional_override(
+    ctx: str,
+    brand: str = "",
+    aliases: Optional[List[str]] = None,
+) -> bool:
+    """Positive tone only when the brand (not a third party) backs, celebrates or allies."""
+    if not ctx:
+        return False
     c_low = unidecode(ctx.lower())
+    if brand:
+        tokens = [unidecode(brand.lower().strip())] + [
+            unidecode(a.lower().strip()) for a in (aliases or []) if a.strip()
+        ]
+        if tokens and not any(t and t in c_low for t in tokens):
+            return False
     positive_actions = [
         "celebra y respalda", "respalda el nombramiento", "respaldan el nombramiento",
         "acompanamos desde", "acompanamiento desde", "asesoria gratuita", "apoyo gratuito",
@@ -797,6 +803,86 @@ def check_positive_institutional_override(ctx: str) -> bool:
     has_positive = any(p in c_low for p in positive_actions)
     has_negative_allegation = any(n in c_low for n in ["denuncia penal", "sancion fiscal", "investigacion por corrupcion", "plagio"])
     return has_positive and not has_negative_allegation
+
+
+GENERIC_TEMA_LABELS = frozenset({
+    "gestión institucional", "gestion institucional", "otros", "otro", "general",
+    "-", "",
+})
+
+
+def _majority_label(labels: List[str]) -> str:
+    cleaned = [str(x).strip() for x in labels if str(x).strip()]
+    if not cleaned:
+        return ""
+    counts = Counter(cleaned)
+    specific = [(lab, n) for lab, n in counts.items() if lab.lower() not in GENERIC_TEMA_LABELS]
+    pool = specific or list(counts.items())
+    pool.sort(key=lambda kv: (-kv[1], -len(kv[0]), kv[0]))
+    return pool[0][0]
+
+
+def _subtemas_related(a: str, b: str) -> bool:
+    """Same fact family (sede norte / inauguración sede norte), not a shared opener like 'apertura de'."""
+    if not a or not b:
+        return False
+    na = normalize_text_for_matching(a)
+    nb = normalize_text_for_matching(b)
+    if not na or not nb:
+        return False
+    if na == nb or na in nb or nb in na:
+        return True
+    sa = get_content_words_set(na)
+    sb = get_content_words_set(nb)
+    if not sa or not sb:
+        return False
+    overlap = sa & sb
+    if len(overlap) < 2:
+        return False
+    denser = min(len(sa), len(sb))
+    if denser and len(overlap) / denser >= 0.5:
+        return True
+    return fuzz.token_set_ratio(na, nb) >= 78
+
+
+def synthesize_temas_from_subtemas(
+    cluster_results: Dict[int, Tuple[str, str, str]],
+) -> Dict[int, Tuple[str, str, str]]:
+    """Related subtemas share one tema. Does not invent labels; majority among the family."""
+    subs = [sub for _, _, sub in cluster_results.values() if sub]
+    unique_subs = list(dict.fromkeys(subs))
+    parent = {s: s for s in unique_subs}
+
+    def find(x: str) -> str:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    for i in range(len(unique_subs)):
+        for j in range(i + 1, len(unique_subs)):
+            if _subtemas_related(unique_subs[i], unique_subs[j]):
+                ra, rb = find(unique_subs[i]), find(unique_subs[j])
+                if ra != rb:
+                    parent[rb] = ra
+
+    families: Dict[str, List[str]] = {}
+    for s in unique_subs:
+        families.setdefault(find(s), []).append(s)
+
+    sub_to_tema: Dict[str, str] = {}
+    for members in families.values():
+        member_set = set(members)
+        temas = [tema for _, tema, sub in cluster_results.values() if sub in member_set]
+        chosen = _majority_label(temas)
+        if chosen:
+            for m in members:
+                sub_to_tema[m] = chosen
+
+    return {
+        cid: (tono, sub_to_tema.get(sub, tema), sub)
+        for cid, (tono, tema, sub) in cluster_results.items()
+    }
 
 def _fallback_from_title(title: str) -> str:
     if not title:
@@ -829,7 +915,11 @@ def cluster_similar_rows(
 
     for k, i in enumerate(sorted_indices, start=1):
         t_raw = str(rows[i].get(km.get("titulo", "Título"), ""))
-        r_raw = str(rows[i].get("Resumen - Aclaracion") or rows[i].get("resumen corto") or "")
+        ctx_raw = str(rows[i].get("Contexto analizado") or "")
+        if ctx_raw.strip() in ("", "-", "nan", "None"):
+            r_raw = str(rows[i].get("Resumen - Aclaracion") or rows[i].get("resumen corto") or "")
+        else:
+            r_raw = ctx_raw
         
         t_norm = normalize_text_for_matching(t_raw)
         c_words = get_content_words_set(t_norm)
@@ -922,7 +1012,11 @@ def cluster_similar_rows(
             
     return cluster_map
 
-def canonicalize_subtopics(cluster_results: Dict[int, Tuple[str, str, str]]) -> Dict[int, Tuple[str, str, str]]:
+def canonicalize_subtopics(
+    cluster_results: Dict[int, Tuple[str, str, str]],
+    unify_related_themes: bool = True,
+) -> Dict[int, Tuple[str, str, str]]:
+    """Same/similar facts share subtema; optional tema families follow those subtemas."""
     subtemas_list = [sub for _, _, sub in cluster_results.values() if sub]
     counts = Counter(subtemas_list)
     unique_subs = list(counts.keys())
@@ -939,11 +1033,23 @@ def canonicalize_subtopics(cluster_results: Dict[int, Tuple[str, str, str]]) -> 
                 mapping[s1] = chosen
                 mapping[s2] = chosen
 
-    final_results = {}
+    by_sub: Dict[str, List[int]] = {}
+    staged: Dict[int, Tuple[str, str, str]] = {}
     for cid, (tono, tema, sub) in cluster_results.items():
         canonical_sub = mapping.get(sub, sub)
-        final_results[cid] = (tono, tema, canonical_sub)
-        
+        staged[cid] = (tono, tema, canonical_sub)
+        by_sub.setdefault(canonical_sub, []).append(cid)
+
+    final_results = {}
+    for sub, cids in by_sub.items():
+        chosen_tono = _majority_label([staged[c][0] for c in cids])
+        chosen_tema = _majority_label([staged[c][1] for c in cids])
+        for cid in cids:
+            tono, tema, _ = staged[cid]
+            final_results[cid] = (chosen_tono or tono, chosen_tema or tema, sub)
+
+    if unify_related_themes:
+        final_results = synthesize_temas_from_subtemas(final_results)
     return final_results
 
 def _labels_too_close(a: str, b: str) -> bool:
@@ -989,6 +1095,40 @@ def ensure_subtema_distinct_from_tema(
     return ctx_phrase or llm_clean or "Hecho informativo institucional"
 
 
+def brand_tone_instructions(brand: str, aliases: Optional[List[str]] = None, step: int = 1) -> str:
+    """Tono = reputational impact on this client, never overall article mood."""
+    alias_txt = ", ".join(a.strip() for a in (aliases or []) if a.strip()) or "ninguno"
+    return (
+        f'{step}. "tono": SOLO el impacto reputacional sobre el cliente "{brand}" '
+        f'(alias: {alias_txt}). Valores: "Positivo", "Negativo" o "Neutro".\n'
+        "   PROHIBIDO clasificar el sentimiento general de la noticia o el enojo hacia un tercero.\n"
+        "   Si el artículo ataca a otro actor (gobierno, otra empresa, un particular) y la marca "
+        "solo aparece como dato, sede, fuente o mención neutra/positiva, el tono de la MARCA "
+        'es "Neutro" o "Positivo", nunca el ánimo del resto del texto.\n'
+        "   REGLA DE ORO: si el cliente expresa o recibe ACOMPAÑAMIENTO, RESPALDO, APOYO, "
+        'FELICITACIONES, CELEBRACIÓN o ALIANZA, el tono es estrictamente "Positivo".'
+    )
+
+
+def brand_tone_examples(brand: str) -> str:
+    b = brand or "la marca"
+    return f"""
+EJEMPLOS DE TONO (respecto a "{b}", no al clima de la noticia):
+- Caso 1: "{b} acompaña a las familias afectadas por un sismo..."
+  -> Tono: "Positivo" (solidaridad de la marca).
+- Caso 2: "{b} celebra y respalda un nombramiento..."
+  -> Tono: "Positivo" (respaldo institucional de la marca).
+- Caso 3: "{b} y otra entidad abren asesoría gratuita..."
+  -> Tono: "Positivo" (alianza de la marca).
+- Caso 4: "Denuncian cobros excesivos de un TERCERO. {b} solo es la sede del evento."
+  -> Tono: "Neutro" (el enojo no es reputacional para la marca).
+- Caso 5: "Quejas por fallas atribuibles a {b}..."
+  -> Tono: "Negativo" (afectación directa a la marca).
+- Caso 6: "Boletín de cifras donde {b} aporta un dato técnico..."
+  -> Tono: "Neutro".
+"""
+
+
 def _call_openai_cluster(
     client: OpenAI,
     model: str,
@@ -1010,15 +1150,14 @@ def _call_openai_cluster(
     steps = []
     n = 1
     if request_tone:
-        steps.append(
-            f'{n}. "tono": Impacto reputacional en el cliente ("{brand}"): "Positivo", "Negativo" o "Neutro".\n'
-            '   REGLA DE ORO: Si el cliente expresa o recibe ACOMPAÑAMIENTO, RESPALDO, APOYO, FELICITACIONES, CELEBRACIÓN o ALIANZA, el tono es estrictamente "Positivo".'
-        )
+        steps.append(brand_tone_instructions(brand, aliases, n))
         json_fields.append('"tono": "..."')
         n += 1
     if request_theme:
         steps.append(
-            f'{n}. "tema": DOMINIO GENERAL (Nivel Macro, 1 a 3 palabras. Ej: "Educación Superior", "Gestión Tributaria", "Sector Salud"). PROHIBIDO "Otros".'
+            f'{n}. "tema": dominio que AGRUPA subtemas relacionados (español colombiano, 2 a 5 palabras). '
+            'Sintetiza el hecho; no copies el subtema ni uses "Otros". '
+            'Ejemplos de forma (no de cliente): "Educación Superior", "Gestión Tributaria", "Sector Salud".'
         )
         json_fields.append('"tema": "..."')
         n += 1
@@ -1050,21 +1189,10 @@ def _call_openai_cluster(
 
     tone_examples = ""
     if request_tone:
-        tone_examples = """
-EJEMPLOS DE TONO OBLIGATORIO:
-- Caso 1: "Sismo en la región: Acompañamos desde la Universidad Autónoma de Occidente a las familias afectadas..."
-  -> Tono: "Positivo" (solidaridad y acompañamiento institucional de la marca).
-- Caso 2: "Designación ministerial: La Universidad Autónoma de Occidente celebra y respalda el nombramiento..."
-  -> Tono: "Positivo" (respaldo y felicitación institucional de la marca).
-- Caso 3: "UAO y DIAN abren espacio de asesoría gratuita en trámites aduaneros..."
-  -> Tono: "Positivo" (alianza y beneficio para la comunidad).
-- Caso 4: "Denuncian quejas por cobros excesivos o fallas en el servicio..."
-  -> Tono: "Negativo" (afectación directa).
-- Caso 5: "Boletín general de cifras donde la entidad aporta un dato técnico..."
-  -> Tono: "Neutro" (informativo sin juicio de valor).
-"""
+        tone_examples = brand_tone_examples(brand)
 
     prompt = f"""Analiza esta noticia para el cliente: "{brand}" (Alias: {', '.join(aliases) if aliases else 'Ninguno'}).
+El tono se evalúa ÚNICAMENTE sobre este cliente y sus alias, no sobre el sentimiento general del artículo.
 
 Titular de referencia: "{title_ref}"
 Contexto analizado:
@@ -1082,7 +1210,16 @@ Responde estrictamente en JSON:
         resp = client.chat.completions.create(
             model=model,
             messages=[
-                {"role": "system", "content": "Auditor senior de medios. Clasifica el tono institucional y los hechos con alta precisión."},
+                {
+                    "role": "system",
+                    "content": (
+                        "Auditor reputacional de medios en Colombia. "
+                        "El tono mide SOLO el impacto sobre el cliente y sus alias, "
+                        "nunca el sentimiento general de la noticia. "
+                        "El tema agrupa subtemas relacionados. "
+                        "El subtema es una frase nominal completa en español colombiano."
+                    ),
+                },
                 {"role": "user", "content": prompt}
             ],
             response_format={"type": "json_object"},
@@ -1094,7 +1231,7 @@ Responde estrictamente en JSON:
         if request_tone:
             tono_raw = str(data.get("tono", "Neutro")).strip().capitalize()
             tono = tono_raw if tono_raw in ["Positivo", "Negativo", "Neutro"] else "Neutro"
-            if check_positive_institutional_override(ctx):
+            if check_positive_institutional_override(ctx, brand, aliases):
                 tono = "Positivo"
         else:
             tono = "Neutro"
@@ -1121,7 +1258,7 @@ Responde estrictamente en JSON:
         else:
             tema_fb = (pkl_theme or "").strip() or "Gestión Institucional"
             sub_fb = ensure_subtema_distinct_from_tema(tema_fb, "", brand, title_ref, ctx)
-        tono_fb = "Positivo" if check_positive_institutional_override(ctx) else "Neutro"
+        tono_fb = "Positivo" if check_positive_institutional_override(ctx, brand, aliases) else "Neutro"
         return tono_fb, tema_fb, sub_fb
 
 
@@ -1274,7 +1411,18 @@ def enrich_rows_with_ai(
                 pct = 77 + int((completed / total_clusters) * 16) if total_clusters else 93
                 progress_callback(pct, f"Etiquetando con IA… {completed}/{total_clusters} hechos")
 
-    cluster_results = canonicalize_subtopics(cluster_results)
+    if theme_model is None:
+        for cid, (tono, tema, subtema) in list(cluster_results.items()):
+            sample_idx = cluster_to_sample_idx[cid]
+            tema = ensure_different_tema_subtema(
+                tema, subtema, rows[sample_idx].get("Contexto analizado", "")
+            )
+            cluster_results[cid] = (tono, tema, subtema)
+
+    cluster_results = canonicalize_subtopics(
+        cluster_results,
+        unify_related_themes=theme_model is None,
+    )
 
     for i, row in enumerate(rows):
         if row.get("is_duplicate"):
@@ -1297,9 +1445,6 @@ def enrich_rows_with_ai(
             if theme_model is None:
                 tema = "Estudiantes"
             subtema = "Redacción de artículo"
-
-        if theme_model is None:
-            tema = ensure_different_tema_subtema(tema, subtema, row.get("Contexto analizado", ""))
 
         row["Tono_IA"] = tono
         row["Tema_IA"] = tema

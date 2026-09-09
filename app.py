@@ -484,7 +484,7 @@ def main():
                 brand_input = st.text_input(
                     "Marca o Cliente Principal*",
                     placeholder="Ej: Universidad de Antioquia, Ecopetrol, Bancolombia",
-                    help="La IA evaluará el sentimiento respecto a esta marca."
+                    help="Tono = impacto reputacional en esta marca y sus alias, no el sentimiento general de la noticia.",
                 )
             with c_alias:
                 alias_input = st.text_input(
