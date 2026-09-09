@@ -20,7 +20,12 @@ from openpyxl import load_workbook
 from openpyxl.utils.cell import column_index_from_string, coordinate_from_string, range_boundaries
 from unidecode import unidecode
 
-from ai_analyzer import enrich_rows_with_ai, cluster_similar_rows
+from ai_analyzer import (
+    build_brand_context,
+    classify_brand_tone_rules,
+    enrich_rows_with_ai,
+    cluster_similar_rows,
+)
 from pkl_classifier import (
     apply_pkl_classifiers,
     fill_classification_context,
@@ -47,7 +52,6 @@ BASE_OUTPUT_COLUMNS = [
     "Nro. Pagina", "Dimensión", "Duración - Nro. Caracteres",
     "CPE", "Tier", "Audiencia",
     "revalorización", "resumen corto",
-    "Grupo noticia", "Confianza agrupación", "Confianza tono", "Confianza subtema", "Evidencia tono", "Relación con la marca",
     "Link Nota", "Resumen - Aclaracion", "Link (Streaming - Imagen)", "Menciones - Empresa",
     "ID duplicada",
 ]
@@ -881,7 +885,7 @@ def process_dossier(
 
     if has_ai or has_pkl:
         rev_idx = BASE_OUTPUT_COLUMNS.index("revalorización")
-        ai_cols = ["Contexto analizado", "Tono_IA", "Tema_IA", "Subtema_IA", "Grupo noticia", "Confianza agrupación", "Confianza tono", "Confianza subtema", "Evidencia tono", "Relación con la marca"]
+        ai_cols = ["Contexto analizado", "Tono_IA", "Tema_IA", "Subtema_IA"]
         cols_to_export = BASE_OUTPUT_COLUMNS[:rev_idx + 1] + ai_cols + BASE_OUTPUT_COLUMNS[rev_idx + 1:]
     else:
         cols_to_export = list(BASE_OUTPUT_COLUMNS)
