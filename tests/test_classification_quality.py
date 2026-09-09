@@ -16,18 +16,22 @@ if TESTS not in sys.path:
     sys.path.insert(0, TESTS)
 
 from ai_analyzer import (
+    apply_marca_free_subtemas,
+    brand_content_tokens,
     brand_tone_examples,
     brand_tone_instructions,
     check_list_mention_neutral,
     check_positive_institutional_override,
     cluster_similar_rows,
+    collect_run_marca_tokens,
     enrich_rows_with_ai,
     ensure_subtema_distinct_from_tema,
     generate_brand_variants,
+    reconcile_az_same_story_labels,
     subtema_supported_by_context,
     _has_echoed_content_pair,
 )
-from pipeline import KEY_MAP
+from pipeline import KEY_MAP, detectar_duplicados_avanzado
 from test_pkl_subtema_grouping import _PredictByKeyword, _news_row
 
 
@@ -437,6 +441,243 @@ class InspirateSameStoryTests(unittest.TestCase):
             f"fallback must ground in the feria, got {scrap!r}",
         )
         self.assertNotRegex(scrap_low, r"\b(uniminuto|minuto|bellas|matricula|libre)\b")
+
+
+def _assert_no_marca_tokens(phrase: str, brand: str, aliases):
+    toks = brand_content_tokens(brand, aliases)
+    phrase_toks = {
+        w for w in unidecode(phrase.lower()).replace("-", " ").split() if w
+    }
+    overlap = phrase_toks & toks
+    if overlap:
+        raise AssertionError(f"marca tokens {sorted(overlap)} leaked into {phrase!r}")
+
+
+class MarcaFreeSubtemaTests(unittest.TestCase):
+    def test_university_client_fixture_never_keeps_marca_or_alias(self):
+        cases = [
+            (
+                "Universidad tecnológica de bolívar apoya en quindío",
+                "La Universidad Tecnológica de Bolívar apoya en el Quindío con "
+                "ingenieros SIAB tras el sismo: refuerzo estructural de viviendas.",
+                "Universidad tecnológica de bolívar apoya en quindío",
+            ),
+            (
+                "Lanzamiento de la cátedra ficci utb",
+                FICCI_CINE_CTX,
+                "Lanzamiento de la cátedra ficci utb",
+            ),
+            (
+                "Alicia Bozzi asume rectoría de la UTB",
+                "Alicia Bozzi asume la rectoría de la Universidad Tecnológica de Bolívar "
+                "para el nuevo periodo académico.",
+                "Alicia bozzi asume rectoría de la utb",
+            ),
+            (
+                "UTB como aliada en jornada educativa",
+                "La Universidad Tecnológica de Bolívar firma un convenio de becas "
+                "para estudiantes del Caribe en la jornada educativa de Cartagena.",
+                "Universidad tecnológica de bolívar como aliada",
+            ),
+        ]
+        for title, ctx, llm_sub in cases:
+            sub = ensure_subtema_distinct_from_tema(
+                "Educación Superior", llm_sub, BRAND, title, ctx, ALIASES
+            )
+            low = unidecode(sub.strip().lower())
+            _assert_no_marca_tokens(sub, BRAND, ALIASES)
+            self.assertGreaterEqual(len(sub.split()), 4, sub)
+            self.assertLessEqual(len(sub.split()), 7, sub)
+            self.assertFalse(low.startswith("universidad tecnologica"))
+            self.assertFalse(low.endswith(" utb"))
+            self.assertNotIn(" como aliada", f" {low} ")
+
+    def test_ecopetrol_client_is_also_stripped(self):
+        brand = "Ecopetrol"
+        aliases = ["ECO", "ECP"]
+        sub = ensure_subtema_distinct_from_tema(
+            "Energía",
+            "Ecopetrol anuncia nuevos programas de hidrógeno",
+            brand,
+            "Ecopetrol lanza piloto de hidrógeno verde en el Magdalena",
+            "Ecopetrol puso en marcha un piloto de hidrógeno verde en el Magdalena Medio.",
+            aliases,
+        )
+        _assert_no_marca_tokens(sub, brand, aliases)
+        low = unidecode(sub.lower())
+        self.assertTrue("hidrogeno" in low or "piloto" in low or "magdalena" in low, sub)
+
+    def test_run_tokens_include_menciones_empresa_not_hardcoded_utb(self):
+        rows = [
+            {
+                "Título": "Nota",
+                "Menciones - Empresa": "Bancolombia",
+                "is_duplicate": False,
+            }
+        ]
+        toks = collect_run_marca_tokens("Bancolombia", ["Bancolombia S.A."], rows, KM)
+        self.assertIn("bancolombia", toks)
+        self.assertNotIn("utb", toks)
+        self.assertNotIn("bolivar", toks)
+
+    def test_enrich_strips_marca_from_llm_subtema(self):
+        rows = [
+            _row(
+                "Alicia Bozzi asume rectoría de la UTB",
+                "Alicia Bozzi asume la rectoría de la Universidad Tecnológica de Bolívar "
+                "en Cartagena para el nuevo periodo.",
+            )
+        ]
+        with patch("ai_analyzer.OpenAI"):
+            with patch("ai_analyzer._call_openai_cluster") as mock_llm:
+                mock_llm.return_value = (
+                    "Neutro",
+                    "Gobierno",
+                    "Alicia bozzi asume rectoría de la utb",
+                )
+                out = enrich_rows_with_ai(rows, KM, BRAND, ALIASES, "sk-test")
+        _assert_no_marca_tokens(out[0]["Subtema_IA"], BRAND, ALIASES)
+        low = unidecode(out[0]["Subtema_IA"].lower())
+        self.assertTrue("rectoria" in low or "bozzi" in low, out[0]["Subtema_IA"])
+
+
+class AzSameStoryReconcileTests(unittest.TestCase):
+    def test_az_title_neighbors_same_story_share_labels(self):
+        rows = [
+            _row(
+                "Ingenieros SIAB apoyan en el Quindío",
+                "Ingenieros SIAB de la UTB apoyan comunidades del Quindío en el Eje Cafetero.",
+            ),
+            _row(
+                "Ingenieros SIAB al Eje Cafetero",
+                "SIAB envía ingenieros al Eje Cafetero. Participa la Universidad Tecnológica de Bolívar.",
+            ),
+            _row("Incremento en matrícula universitaria en Cartagena", MATRICULA_CTX),
+        ]
+        rows[0]["Tono_IA"] = "Positivo"
+        rows[0]["Tema_IA"] = "Educación Superior"
+        rows[0]["Subtema_IA"] = "Apoyo estructural tras sismo"
+        rows[0]["Contexto analizado"] = rows[0]["Resumen - Aclaracion"]
+        rows[1]["Tono_IA"] = "Neutro"
+        rows[1]["Tema_IA"] = "Otro"
+        rows[1]["Subtema_IA"] = "Ingenieros al eje cafetero"
+        rows[1]["Contexto analizado"] = rows[1]["Resumen - Aclaracion"]
+        rows[2]["Tono_IA"] = "Positivo"
+        rows[2]["Tema_IA"] = "Educación Superior"
+        rows[2]["Subtema_IA"] = "Incremento en matrícula universitaria"
+        rows[2]["Contexto analizado"] = MATRICULA_CTX
+
+        out = reconcile_az_same_story_labels(rows, KM, BRAND, ALIASES)
+        self.assertEqual(out[0]["Tono_IA"], out[1]["Tono_IA"])
+        self.assertEqual(out[0]["Tema_IA"], out[1]["Tema_IA"])
+        self.assertEqual(out[0]["Subtema_IA"], out[1]["Subtema_IA"])
+        self.assertNotEqual(out[0]["Subtema_IA"], out[2]["Subtema_IA"])
+        self.assertNotEqual(out[0]["Tono_IA"], "Duplicada")
+
+    def test_shared_city_university_different_facts_do_not_share(self):
+        rows = [
+            _row(
+                "Cartagena, cine y memoria: así comienza la nueva cátedra FICCI-UTB",
+                FICCI_CINE_CTX,
+            ),
+            _row("Incremento en matrícula universitaria en Cartagena", MATRICULA_CTX),
+        ]
+        rows[0]["Tono_IA"] = "Neutro"
+        rows[0]["Tema_IA"] = "Cultura"
+        rows[0]["Subtema_IA"] = "Cátedra de cine y memoria"
+        rows[0]["Contexto analizado"] = FICCI_CINE_CTX
+        rows[1]["Tono_IA"] = "Positivo"
+        rows[1]["Tema_IA"] = "Educación Superior"
+        rows[1]["Subtema_IA"] = "Incremento en matrícula universitaria"
+        rows[1]["Contexto analizado"] = MATRICULA_CTX
+        out = reconcile_az_same_story_labels(rows, KM, BRAND, ALIASES)
+        self.assertNotEqual(out[0]["Subtema_IA"], out[1]["Subtema_IA"])
+        self.assertNotEqual(out[0]["Tema_IA"], out[1]["Tema_IA"])
+        ficci = unidecode(out[0]["Subtema_IA"].lower())
+        self.assertTrue("cine" in ficci or "catedra" in ficci or "ficci" in ficci)
+        self.assertNotIn("matricula", ficci)
+
+    def test_marca_free_pass_does_not_touch_duplicate_flags(self):
+        rows = [
+            _row("Women in Tech Latam Awards 2026", "La UTB fue reconocida en Women in Tech."),
+            _row("Women in Tech Latam Awards 2026", "mismo url"),
+        ]
+        rows[0]["Tono_IA"] = "Neutro"
+        rows[0]["Tema_IA"] = "Premios"
+        rows[0]["Subtema_IA"] = "Premios women in tech latam"
+        rows[0]["Contexto analizado"] = rows[0]["Resumen - Aclaracion"]
+        rows[1]["is_duplicate"] = True
+        rows[1]["Tono_IA"] = "Duplicada"
+        rows[1]["Tema_IA"] = "-"
+        rows[1]["Subtema_IA"] = "-"
+        rows[1]["ID duplicada"] = "555"
+        apply_marca_free_subtemas(rows, KM, BRAND, ALIASES)
+        reconcile_az_same_story_labels(rows, KM, BRAND, ALIASES)
+        self.assertTrue(rows[1]["is_duplicate"])
+        self.assertEqual(rows[1]["Tono_IA"], "Duplicada")
+        self.assertEqual(rows[1]["Subtema_IA"], "-")
+        self.assertEqual(rows[1]["ID duplicada"], "555")
+
+
+class DuplicateDetectionUnchangedTests(unittest.TestCase):
+    def test_url_and_mencion_still_mark_duplicate(self):
+        rows = [
+            {
+                "ID Noticia": 10,
+                "Tipo de Medio": "Internet",
+                "Menciones - Empresa": "UTB",
+                "URL Nota": "https://www.example.com/nota",
+                "is_duplicate": False,
+                "ID duplicada": "",
+            },
+            {
+                "ID Noticia": 11,
+                "Tipo de Medio": "Internet",
+                "Menciones - Empresa": "UTB",
+                "URL Nota": "http://example.com/nota/",
+                "is_duplicate": False,
+                "ID duplicada": "",
+            },
+            {
+                "ID Noticia": 12,
+                "Tipo de Medio": "Internet",
+                "Menciones - Empresa": "Otra Marca",
+                "URL Nota": "https://www.example.com/nota",
+                "is_duplicate": False,
+                "ID duplicada": "",
+            },
+        ]
+        out = detectar_duplicados_avanzado(rows, KM)
+        self.assertFalse(out[0]["is_duplicate"])
+        self.assertTrue(out[1]["is_duplicate"])
+        self.assertEqual(str(out[1]["ID duplicada"]), "10")
+        self.assertFalse(out[2]["is_duplicate"])
+
+    def test_broadcast_medio_hora_mencion_still_marks_duplicate(self):
+        rows = [
+            {
+                "ID Noticia": 20,
+                "Tipo de Medio": "Radio",
+                "Medio": "Caracol Radio",
+                "Hora": "08:15",
+                "Menciones - Empresa": "UTB",
+                "is_duplicate": False,
+                "ID duplicada": "",
+            },
+            {
+                "ID Noticia": 21,
+                "Tipo de Medio": "Radio",
+                "Medio": "Caracol Radio",
+                "Hora": "8:15:00",
+                "Menciones - Empresa": "UTB",
+                "is_duplicate": False,
+                "ID duplicada": "",
+            },
+        ]
+        out = detectar_duplicados_avanzado(rows, KM)
+        self.assertFalse(out[0]["is_duplicate"])
+        self.assertTrue(out[1]["is_duplicate"])
+        self.assertEqual(str(out[1]["ID duplicada"]), "20")
 
 
 if __name__ == "__main__":

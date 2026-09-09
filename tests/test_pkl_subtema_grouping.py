@@ -92,8 +92,8 @@ class SubtemaQualityWithTemaPklTests(unittest.TestCase):
         self.assertFalse(low.startswith("de ese"))
         self.assertNotIn("salió", low)
         self.assertNotIn("salio", low)
-        self.assertIn("simón bolívar", low)
-        self.assertFalse(low.endswith("simón"))
+        for token in ("simón", "simon", "bolívar", "bolivar"):
+            self.assertNotRegex(low, rf"\b{token}\b")
         self.assertTrue(
             "formación" in low or "formacion" in low or "abogado" in low or "académic" in low
         )
@@ -114,9 +114,10 @@ class SubtemaQualityWithTemaPklTests(unittest.TestCase):
         words = sub.split()
         self.assertLessEqual(len(words), 7)
         self.assertGreaterEqual(len(words), 4)
-        self.assertIn("bolívar", sub.lower())
         self.assertTrue(sub.lower().startswith("formación académica"))
         self.assertNotIn("ese barrio", sub.lower())
+        for token in ("simón", "simon", "bolívar", "bolivar"):
+            self.assertNotRegex(sub.lower(), rf"\b{token}\b")
 
     def test_subtema_max_seven_words_and_rejects_explicit_lead_scrap(self):
         ctx = (
@@ -133,7 +134,11 @@ class SubtemaQualityWithTemaPklTests(unittest.TestCase):
         )
         self.assertLessEqual(len(sub.split()), 7)
         self.assertNotEqual(sub.strip().lower(), "ese barrio salió primero un joven")
-        self.assertIn("simón bolívar", sub.lower())
+        for token in ("simón", "simon", "bolívar", "bolivar"):
+            self.assertNotRegex(sub.lower(), rf"\b{token}\b")
+        self.assertTrue(
+            "formación" in sub.lower() or "formacion" in sub.lower() or "abogado" in sub.lower()
+        )
 
     def test_ensure_does_not_use_title_scrap_when_context_exists(self):
         title = "Gobierno presenta reforma tributaria en el Congreso"
@@ -245,8 +250,14 @@ class SubtemaQualityWithTemaPklTests(unittest.TestCase):
         self.assertEqual(out[0]["Tema_IA"], "Mención")
         self.assertEqual(out[0]["Subtema_IA"], out[1]["Subtema_IA"])
         self.assertLessEqual(len(out[0]["Subtema_IA"].split()), 7)
-        self.assertIn("simón bolívar", out[0]["Subtema_IA"].lower())
+        for token in ("simón", "simon", "bolívar", "bolivar"):
+            self.assertNotRegex(out[0]["Subtema_IA"].lower(), rf"\b{token}\b")
         self.assertNotIn("ese barrio", out[0]["Subtema_IA"].lower())
+        self.assertTrue(
+            "formación" in out[0]["Subtema_IA"].lower()
+            or "formacion" in out[0]["Subtema_IA"].lower()
+            or "abogado" in out[0]["Subtema_IA"].lower()
+        )
 
 
 class PklGroupingWithoutAiTests(unittest.TestCase):
