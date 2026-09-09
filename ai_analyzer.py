@@ -161,6 +161,23 @@ def get_lead_content_words(text_norm: str, n_words: int = 3) -> Tuple[str, ...]:
     words = [w for w in text_norm.split() if len(w) > 2 and w not in STOPWORDS_ES]
     return tuple(words[:n_words])
 
+
+def brand_content_tokens(brand: str, aliases: Optional[List[str]] = None) -> Set[str]:
+    """Content tokens of the client name; must not be used as 'same story' evidence."""
+    toks: Set[str] = set()
+    for item in [brand] + list(aliases or []):
+        if not str(item).strip():
+            continue
+        toks |= get_content_words_set(normalize_text_for_matching(str(item)))
+    return toks
+
+
+def _without_brand_tokens(norm_text: str, brand_toks: Set[str]) -> str:
+    if not brand_toks:
+        return norm_text
+    return " ".join(w for w in (norm_text or "").split() if w not in brand_toks)
+
+
 def extract_event_anchor(title_raw: str) -> str:
     if not title_raw:
         return ""
@@ -900,12 +917,16 @@ def cluster_similar_rows(
     brand_regexes: List[str],
     progress_callback: Optional[Callable[[int, str], None]] = None,
     progress_pct: int = 74,
+    brand: str = "",
+    aliases: Optional[List[str]] = None,
 ) -> Dict[int, int]:
+    """Group only true reprints / near-duplicate stories, never 'same brand'."""
     n = len(rows)
     cluster_map = {}
     clusters_rep = {}
     current_cluster = 0
-    
+    brand_toks = brand_content_tokens(brand, aliases)
+
     active_indices = [i for i in range(n) if not rows[i].get("is_duplicate")]
     total_active = len(active_indices)
     sorted_indices = sorted(
@@ -915,22 +936,22 @@ def cluster_similar_rows(
 
     for k, i in enumerate(sorted_indices, start=1):
         t_raw = str(rows[i].get(km.get("titulo", "Título"), ""))
-        ctx_raw = str(rows[i].get("Contexto analizado") or "")
-        if ctx_raw.strip() in ("", "-", "nan", "None"):
-            r_raw = str(rows[i].get("Resumen - Aclaracion") or rows[i].get("resumen corto") or "")
-        else:
-            r_raw = ctx_raw
+        r_raw = str(rows[i].get("Resumen - Aclaracion") or rows[i].get("resumen corto") or "")
         
         t_norm = normalize_text_for_matching(t_raw)
-        c_words = get_content_words_set(t_norm)
-        lead_words = get_lead_content_words(t_norm, n_words=3)
+        t_story = _without_brand_tokens(t_norm, brand_toks)
+        c_words = get_content_words_set(t_story)
+        lead_words = get_lead_content_words(t_story, n_words=3)
         anchor = extract_event_anchor(t_raw)
-        r_norm = normalize_text_for_matching(r_raw[:350])
+        if brand_toks and get_content_words_set(anchor).issubset(brand_toks):
+            anchor = ""
+        r_norm = _without_brand_tokens(normalize_text_for_matching(r_raw[:350]), brand_toks)
         r_words = get_content_words_set(r_norm)
         
         assigned = False
         for cid, rep in clusters_rep.items():
             rep_t = rep["title_norm"]
+            rep_story = rep["title_story"]
             rep_words = rep["content_words"]
             rep_lead = rep["lead_words"]
             rep_anchor = rep["anchor"]
@@ -954,40 +975,39 @@ def cluster_similar_rows(
                     assigned = True
                     break
 
-            if t_norm and rep_t:
-                if t_norm in rep_t or rep_t in t_norm:
+            if t_story and rep_story:
+                if t_story in rep_story or rep_story in t_story:
                     cluster_map[i] = cid
                     assigned = True
                     break
-                min_len = min(len(t_norm), len(rep_t))
-                if min_len >= 18 and t_norm[:18] == rep_t[:18]:
+                min_len = min(len(t_story), len(rep_story))
+                if min_len >= 18 and t_story[:18] == rep_story[:18]:
                     cluster_map[i] = cid
                     assigned = True
                     break
 
             overlap = c_words & rep_words
-            if len(overlap) >= 4 or (len(overlap) >= 3 and any(re.search(rx, " ".join(overlap)) for rx in brand_regexes)):
+            if len(overlap) >= 4:
                 cluster_map[i] = cid
                 assigned = True
                 break
 
-            # Skip expensive fuzzy ratios when titles/bodies share almost no content.
-            body_overlap = r_words & rep_r_words
-            if len(overlap) < 2 and len(body_overlap) < 3:
+            if len(overlap) < 2:
                 continue
 
-            if len(overlap) >= 2 and t_norm and rep_t:
-                if fuzz.partial_ratio(t_norm, rep_t) >= 86:
+            if t_story and rep_story and min(len(t_story), len(rep_story)) >= 12:
+                if fuzz.partial_ratio(t_story, rep_story) >= 90:
                     cluster_map[i] = cid
                     assigned = True
                     break
-                if fuzz.token_set_ratio(t_norm, rep_t) >= 70:
+                if fuzz.token_set_ratio(t_story, rep_story) >= 88:
                     cluster_map[i] = cid
                     assigned = True
                     break
             
-            if r_norm and rep_r and len(r_norm) > 40 and len(rep_r) > 40 and len(body_overlap) >= 3:
-                if fuzz.token_set_ratio(r_norm, rep_r) >= 82:
+            if r_norm and rep_r and len(r_norm) > 40 and len(rep_r) > 40:
+                body_overlap = r_words & rep_r_words
+                if len(body_overlap) >= 5 and fuzz.token_set_ratio(r_norm, rep_r) >= 90:
                     cluster_map[i] = cid
                     assigned = True
                     break
@@ -996,6 +1016,7 @@ def cluster_similar_rows(
             cluster_map[i] = current_cluster
             clusters_rep[current_cluster] = {
                 "title_norm": t_norm,
+                "title_story": t_story,
                 "content_words": c_words,
                 "lead_words": lead_words,
                 "anchor": anchor,
@@ -1012,11 +1033,27 @@ def cluster_similar_rows(
             
     return cluster_map
 
+
+def _subtemas_near_duplicate(a: str, b: str) -> bool:
+    """Reprint of the same fact phrase — not a shared brand token or weak overlap."""
+    if not a or not b:
+        return False
+    na = normalize_text_for_matching(a)
+    nb = normalize_text_for_matching(b)
+    if not na or not nb:
+        return False
+    if na == nb:
+        return True
+    return fuzz.ratio(na, nb) >= 92 or (
+        fuzz.token_set_ratio(na, nb) >= 92 and fuzz.token_sort_ratio(na, nb) >= 90
+    )
+
+
 def canonicalize_subtopics(
     cluster_results: Dict[int, Tuple[str, str, str]],
     unify_related_themes: bool = True,
 ) -> Dict[int, Tuple[str, str, str]]:
-    """Same/similar facts share subtema; optional tema families follow those subtemas."""
+    """Only collapse near-duplicate subtema strings. Do not broadcast a dominant junk label."""
     subtemas_list = [sub for _, _, sub in cluster_results.values() if sub]
     counts = Counter(subtemas_list)
     unique_subs = list(counts.keys())
@@ -1024,32 +1061,33 @@ def canonicalize_subtopics(
     mapping = {}
     for i in range(len(unique_subs)):
         s1 = unique_subs[i]
-        norm1 = normalize_text_for_matching(s1)
         for j in range(i + 1, len(unique_subs)):
             s2 = unique_subs[j]
-            norm2 = normalize_text_for_matching(s2)
-            if norm1 == norm2 or fuzz.token_set_ratio(norm1, norm2) >= 70 or fuzz.token_sort_ratio(norm1, norm2) >= 70:
+            if _subtemas_near_duplicate(s1, s2):
                 chosen = s1 if counts[s1] >= counts[s2] else s2
                 mapping[s1] = chosen
                 mapping[s2] = chosen
 
-    by_sub: Dict[str, List[int]] = {}
-    staged: Dict[int, Tuple[str, str, str]] = {}
+    final_results = {}
     for cid, (tono, tema, sub) in cluster_results.items():
         canonical_sub = mapping.get(sub, sub)
-        staged[cid] = (tono, tema, canonical_sub)
-        by_sub.setdefault(canonical_sub, []).append(cid)
-
-    final_results = {}
-    for sub, cids in by_sub.items():
-        chosen_tono = _majority_label([staged[c][0] for c in cids])
-        chosen_tema = _majority_label([staged[c][1] for c in cids])
-        for cid in cids:
-            tono, tema, _ = staged[cid]
-            final_results[cid] = (chosen_tono or tono, chosen_tema or tema, sub)
+        final_results[cid] = (tono, tema, canonical_sub)
 
     if unify_related_themes:
-        final_results = synthesize_temas_from_subtemas(final_results)
+        # Same canonical subtema only (reprints). Never merge unrelated facts into one tema family.
+        by_sub: Dict[str, List[int]] = {}
+        for cid, (tono, tema, sub) in final_results.items():
+            by_sub.setdefault(sub, []).append(cid)
+        aligned = dict(final_results)
+        for sub, cids in by_sub.items():
+            if len(cids) < 2:
+                continue
+            chosen_tema = _majority_label([aligned[c][1] for c in cids])
+            chosen_tono = _majority_label([aligned[c][0] for c in cids])
+            for cid in cids:
+                tono, tema, _ = aligned[cid]
+                aligned[cid] = (chosen_tono or tono, chosen_tema or tema, sub)
+        return aligned
     return final_results
 
 def _labels_too_close(a: str, b: str) -> bool:
@@ -1329,7 +1367,13 @@ def enrich_rows_with_ai(
     if progress_callback:
         progress_callback(74, f"Agrupando noticias similares… 0/{n_active} notas")
     cluster_map = cluster_similar_rows(
-        rows, km, brand_regexes, progress_callback=progress_callback, progress_pct=74
+        rows,
+        km,
+        brand_regexes,
+        progress_callback=progress_callback,
+        progress_pct=74,
+        brand=brand,
+        aliases=aliases,
     )
     
     unique_clusters = sorted(set(cluster_map.values()))
