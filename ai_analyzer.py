@@ -7,7 +7,6 @@ import json
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Dict, Tuple, Optional, Callable, Set
-from collections import Counter
 import pandas as pd
 from openai import OpenAI
 from rapidfuzz import fuzz
@@ -20,6 +19,39 @@ FORBIDDEN_TRAILING_WORDS = {
     "y", "o", "u", "e", "un", "una", "unos", "unas", "su", "sus", "sobre", "tras",
     "hacia", "desde", "sin", "que", "se"
 }
+
+MAX_SUBTEMA_WORDS = 7
+MIN_SUBTEMA_WORDS = 4
+
+DISCOURSE_STARTERS = {
+    "de", "del", "ese", "esa", "esos", "esas", "este", "esta", "estos", "estas",
+    "aquel", "aquella", "luego", "despues", "ademas", "tambien", "mientras",
+    "aunque", "cuando", "donde", "primero", "primera", "entonces", "asi",
+}
+
+FACT_HINTS = {
+    "beca", "becas", "feria", "catedra", "congreso", "abogado", "formacion",
+    "inauguracion", "matricula", "premio", "convenio", "sede", "hospital",
+    "captura", "obra", "acuerdo", "alianza", "egresado", "inscripcion",
+    "oferta", "cine", "memoria", "patrimonio", "inspirate",
+}
+
+TITLE_EVENT_HINTS = (
+    "feria", "inspirate", "catedra", "ficci", "siab", "women", "cine",
+    "patrimonio",
+)
+
+_MEDIA_PREFIX_RE = re.compile(
+    r"^(?:imagenes|en imagenes|fotos|en fotos|video|en video|en vivo)\s*[|:]\s*",
+    re.IGNORECASE,
+)
+_OUTLET_SUFFIX_RE = re.compile(
+    r"\s*[-|]\s*(?:noticias\s+vital|en\s+vivo)\s*$",
+    re.IGNORECASE,
+)
+_LEAD_FUNCTION_RE = re.compile(
+    r"^(?:el|la|los|las|un|una|unos|unas|de|del|en|al|a|y|para|por|con)\s+"
+)
 
 STOPWORDS_ES = {
     "de", "del", "la", "el", "los", "las", "en", "para", "por", "con", "a", "al",
@@ -250,6 +282,263 @@ def check_exact_byline_rule(text: str, brand: str, aliases: List[str]) -> bool:
 
     return False
 
+
+def _brand_token_set(brand: str, aliases: Optional[List[str]] = None) -> Set[str]:
+    parts = [brand or ""] + list(aliases or [])
+    toks: Set[str] = set()
+    for part in parts:
+        for w in re.findall(r"[a-z0-9]+", unidecode(part.lower())):
+            if len(w) > 1 and w not in STOPWORDS_ES:
+                toks.add(w)
+    return toks
+
+
+def _surface_tokens(text: str) -> List[str]:
+    t = unidecode(str(text or "").lower())
+    t = _MEDIA_PREFIX_RE.sub("", t)
+    t = _OUTLET_SUFFIX_RE.sub("", t)
+    return re.findall(r"[a-z0-9]+", t)
+
+
+def _lead_tokens_for_grouping(text: str, brand_tokens: Set[str]) -> List[str]:
+    """Opening tokens of título/resumen after dropping articles and the client marca.
+
+    Matching raw first-3/4 words that are only the brand would re-introduce
+    over-grouping (every 'Gobernadora Lucy García…' story glued together).
+    """
+    toks = _surface_tokens(text)
+    while toks and (toks[0] in STOPWORDS_ES or toks[0] in brand_tokens):
+        toks.pop(0)
+    return toks
+
+
+def _same_opening_lead(text_a: str, text_b: str, brand_tokens: Set[str]) -> bool:
+    """True when both strings share the first 3 or 4 grouping words."""
+    a = _lead_tokens_for_grouping(text_a, brand_tokens)
+    b = _lead_tokens_for_grouping(text_b, brand_tokens)
+    if len(a) >= 4 and len(b) >= 4 and a[:4] == b[:4]:
+        return True
+    if len(a) >= 3 and len(b) >= 3 and a[:3] == b[:3]:
+        return True
+    raw_a, raw_b = _surface_tokens(text_a), _surface_tokens(text_b)
+    if len(raw_a) >= 4 and len(raw_b) >= 4 and raw_a[:4] == raw_b[:4]:
+        content = [w for w in raw_a[:4] if w not in STOPWORDS_ES]
+        if content and not set(content).issubset(brand_tokens):
+            return True
+    if len(raw_a) >= 3 and len(raw_b) >= 3 and raw_a[:3] == raw_b[:3]:
+        content = [w for w in raw_a[:3] if w not in STOPWORDS_ES]
+        if content and not set(content).issubset(brand_tokens):
+            return True
+    return False
+
+
+def _compact_title_key(text: str) -> str:
+    t = unidecode(str(text or "").lower())
+    t = _MEDIA_PREFIX_RE.sub("", t)
+    t = _OUTLET_SUFFIX_RE.sub("", t)
+    t = t.replace("-", "").replace("_", "")
+    t = re.sub(r"[^a-z0-9]+", " ", t)
+    return re.sub(r"\s+", " ", t).strip()
+
+
+def titles_clearly_similar(title_a: str, title_b: str, brand_tokens: Optional[Set[str]] = None) -> bool:
+    """Same título, one is a prefix of the other, or very high order-aware similarity."""
+    ka, kb = _compact_title_key(title_a), _compact_title_key(title_b)
+    if not ka or not kb:
+        return False
+    if ka == kb:
+        return True
+    brand_tokens = brand_tokens or set()
+    shorter, longer = (ka, kb) if len(ka) <= len(kb) else (kb, ka)
+    if len(shorter) >= 24 and longer.startswith(shorter):
+        content = [w for w in shorter.split() if w not in STOPWORDS_ES]
+        if content and not set(content).issubset(brand_tokens):
+            return True
+    if min(len(ka), len(kb)) >= 24 and fuzz.ratio(ka, kb) >= 88:
+        return True
+    return False
+
+
+def should_group_news_items(
+    title_a: str,
+    resumen_a: str,
+    title_b: str,
+    resumen_b: str,
+    brand: str = "",
+    aliases: Optional[List[str]] = None,
+) -> bool:
+    """Grouping is optional. Only same/similar título or shared first 3–4 words."""
+    brand_tokens = _brand_token_set(brand, aliases)
+    if titles_clearly_similar(title_a, title_b, brand_tokens):
+        return True
+    if _same_opening_lead(title_a, title_b, brand_tokens):
+        return True
+    if resumen_a and resumen_b and _same_opening_lead(resumen_a, resumen_b, brand_tokens):
+        return True
+    return False
+
+
+def _row_title(row: dict, km: dict) -> str:
+    return str(row.get(km.get("titulo", "Título"), "") or row.get("Título") or "")
+
+
+def _row_resumen(row: dict) -> str:
+    return str(
+        row.get("Resumen - Aclaracion")
+        or row.get("resumen corto")
+        or row.get("Resumen")
+        or row.get("CuerpoEs")
+        or ""
+    )
+
+
+def _has_echoed_content_pair(words: List[str]) -> bool:
+    lows = [unidecode(w.lower()) for w in words if unidecode(w.lower()) not in STOPWORDS_ES]
+    return any(lows[i] == lows[i + 1] for i in range(len(lows) - 1))
+
+
+def _tokenize_phrase_words(text: str) -> List[str]:
+    return re.findall(r"[A-Za-zÁÉÍÓÚáéíóúÑñÜü0-9]+", str(text or ""))
+
+
+def _is_lead_clause_scrap(words: List[str]) -> bool:
+    if not words:
+        return True
+    first = unidecode(words[0].lower())
+    return first in DISCOURSE_STARTERS
+
+
+def _is_title_scrap(phrase: str, title: str) -> bool:
+    if not phrase or not title:
+        return False
+    phrase_words = [unidecode(w.lower()) for w in phrase.split()]
+    title_words = [unidecode(w.lower()) for w in _tokenize_phrase_words(title)]
+    n = len(phrase_words)
+    if n < MIN_SUBTEMA_WORDS or len(title_words) < n:
+        return False
+    return phrase_words == title_words[:n]
+
+
+def _complete_proper_names_from_context(phrase: str, ctx: str) -> str:
+    """If a phrase ends mid proper name (Simón / Universidad Simón), finish it from contexto."""
+    if not phrase or not ctx:
+        return phrase
+    pwords = phrase.split()
+    cwords = _tokenize_phrase_words(ctx)
+    if not pwords or not cwords:
+        return phrase
+    last = unidecode(pwords[-1].lower())
+    phrase_lows = {unidecode(w.lower()) for w in pwords}
+    for i, src in enumerate(cwords):
+        if unidecode(src.lower()) != last:
+            continue
+        extra: List[str] = []
+        j = i + 1
+        while j < len(cwords):
+            tok = cwords[j]
+            low = unidecode(tok.lower())
+            if low in STOPWORDS_ES or low in DISCOURSE_STARTERS or low in phrase_lows:
+                break
+            if not tok or not tok[0].isupper():
+                break
+            extra.append(tok)
+            j += 1
+            if len(pwords) + len(extra) >= MAX_SUBTEMA_WORDS:
+                break
+        if extra:
+            fitted = pwords + extra
+            while len(fitted) > MAX_SUBTEMA_WORDS and unidecode(fitted[0].lower()) in STOPWORDS_ES:
+                fitted = fitted[1:]
+            fitted = fitted[:MAX_SUBTEMA_WORDS]
+            while fitted and fitted[-1].lower() in FORBIDDEN_TRAILING_WORDS:
+                fitted.pop()
+            return " ".join(fitted)
+        break
+    return phrase
+
+
+def _window_from_context(ctx: str, tema: str, title: str, brand: str) -> str:
+    """Noun-phrase window from this story's contexto; never a lead-clause scrap."""
+    words = _tokenize_phrase_words(ctx)
+    if len(words) < MIN_SUBTEMA_WORDS:
+        return ""
+    brand_toks = _brand_token_set(brand)
+    best = ""
+    best_score = -10**9
+    for n in range(MAX_SUBTEMA_WORDS, MIN_SUBTEMA_WORDS - 1, -1):
+        for i in range(0, len(words) - n + 1):
+            window = list(words[i:i + n])
+            if _is_lead_clause_scrap(window):
+                continue
+            while window and window[-1].lower() in FORBIDDEN_TRAILING_WORDS:
+                window.pop()
+            if len(window) < MIN_SUBTEMA_WORDS:
+                continue
+            phrase = " ".join(window)
+            if _labels_too_close(tema, phrase) or _is_title_scrap(phrase, title):
+                continue
+            lows = [unidecode(w.lower()) for w in window]
+            content = [w for w in lows if w not in STOPWORDS_ES and len(w) > 2]
+            if len(content) < 2:
+                continue
+            if set(content).issubset(brand_toks):
+                continue
+            score = 10 * len(content)
+            score += 16 * sum(1 for w in content if w in FACT_HINTS or any(w.startswith(h) for h in FACT_HINTS))
+            if lows[0] in STOPWORDS_ES:
+                score -= 8
+            if _has_echoed_content_pair(window):
+                score -= 40
+            if score > best_score:
+                best_score = score
+                best = phrase
+    if best_score < 8 or not best:
+        return ""
+    return best.capitalize()
+
+
+def subtema_supported_by_context(
+    subtema: str,
+    ctx: str,
+    brand: str = "",
+    aliases: Optional[List[str]] = None,
+) -> bool:
+    """True when the subtema names this story, not a foreign fact glued on."""
+    stoks = get_content_words_set(normalize_text_for_matching(subtema))
+    ctoks = get_content_words_set(normalize_text_for_matching(ctx))
+    brand_toks = _brand_token_set(brand, aliases)
+    stoks -= brand_toks
+    ctoks -= brand_toks
+    if not stoks:
+        return False
+    overlap_ratio = len(stoks & ctoks) / len(stoks)
+    if overlap_ratio >= 0.4:
+        return True
+    s_fam = _fact_families_present(stoks)
+    c_fam = _fact_families_present(ctoks)
+    if s_fam and c_fam and s_fam.isdisjoint(c_fam):
+        return False
+    return overlap_ratio >= 0.25 or not s_fam
+
+
+_FACT_FAMILIES = (
+    frozenset({"matricula", "beca", "inscrip", "feria", "inspirate", "oferta"}),
+    frozenset({"cine", "catedra", "ficci", "festival", "memoria", "patrimonio"}),
+    frozenset({"siab", "quindio", "ingenier"}),
+    frozenset({"premio", "award", "women"}),
+)
+
+
+def _fact_families_present(tokens: Set[str]) -> Set[int]:
+    hits: Set[int] = set()
+    for i, fam in enumerate(_FACT_FAMILIES):
+        for tok in tokens:
+            if any(tok.startswith(f) or f in tok for f in fam):
+                hits.add(i)
+                break
+    return hits
+
+
 def clean_subtema(text: str, brand: str, title_fallback: str) -> str:
     if not text:
         return _fallback_from_title(title_fallback)
@@ -257,8 +546,8 @@ def clean_subtema(text: str, brand: str, title_fallback: str) -> str:
     clean = re.sub(r'[,.;:!?¿¡"\'\(\)\[\]\{\}\-_/\\|]', ' ', str(text))
     words = [w for w in clean.split() if w]
     
-    if len(words) > 6:
-        words = words[:6]
+    if len(words) > MAX_SUBTEMA_WORDS:
+        words = words[:MAX_SUBTEMA_WORDS]
         
     while words and words[-1].lower() in FORBIDDEN_TRAILING_WORDS:
         words.pop()
@@ -278,8 +567,19 @@ def clean_subtema(text: str, brand: str, title_fallback: str) -> str:
     brand_words = set(re.findall(r"\b[a-z0-9]+\b", unidecode(brand.lower())))
     res_words = set(re.findall(r"\b[a-z0-9]+\b", unidecode(res.lower())))
     
-    if not res or res_words.issubset(brand_words) or res_lower in ["universidad", "autonoma", "fundacion", "clinica", "hospital", "institucion", "asociacion"]:
-        return _fallback_from_title(title_fallback)
+    if (
+        not res
+        or res_words.issubset(brand_words)
+        or _is_lead_clause_scrap(res.split())
+        or _has_echoed_content_pair(res.split())
+        or res_lower in ["universidad", "autonoma", "fundacion", "clinica", "hospital", "institucion", "asociacion"]
+    ):
+        if res_words.issubset(brand_words) or res_lower in [
+            "universidad", "autonoma", "fundacion", "clinica", "hospital",
+            "institucion", "asociacion",
+        ] or not res:
+            return _fallback_from_title(title_fallback)
+        return ""
         
     return res.capitalize()
 
@@ -319,7 +619,11 @@ def ensure_different_tema_subtema(tema: str, subtema: str, ctx: str) -> str:
         
     return t_clean
 
-def check_positive_institutional_override(ctx: str) -> bool:
+def check_positive_institutional_override(
+    ctx: str,
+    brand: str = "",
+    aliases: Optional[List[str]] = None,
+) -> bool:
     """Detecta de forma infalible acompañamiento, respaldo y felicitaciones."""
     c_low = unidecode(ctx.lower())
     positive_actions = [
@@ -330,175 +634,59 @@ def check_positive_institutional_override(ctx: str) -> bool:
     ]
     has_positive = any(p in c_low for p in positive_actions)
     has_negative_allegation = any(n in c_low for n in ["denuncia penal", "sancion fiscal", "investigacion por corrupcion", "plagio"])
-    return has_positive and not has_negative_allegation
+    if not has_positive or has_negative_allegation:
+        return False
+    if brand:
+        names = [brand] + list(aliases or [])
+        if not any(unidecode(n.lower()).strip() and unidecode(n.lower()) in c_low for n in names):
+            return False
+    return True
 
 def _fallback_from_title(title: str) -> str:
     if not title:
         return "Hecho Informativo"
     t = re.sub(r"^(?:imagenes|video|en fotos)\s*\|\s*", "", title, flags=re.IGNORECASE).strip()
     words = re.sub(r'[,.;:!?¿¡"\'\(\)\[\]\{\}\-_/\\|]', ' ', t).split()
-    clean_words = words[:6]
+    clean_words = words[:MAX_SUBTEMA_WORDS]
     while clean_words and clean_words[-1].lower() in FORBIDDEN_TRAILING_WORDS:
         clean_words.pop()
     return " ".join(clean_words).capitalize() if clean_words else "Hecho Informativo"
 
-def _distinctive_subset(words: Set[str], doc_freq: Counter, total_docs: int) -> Set[str]:
-    """Filtra palabras que se repiten en gran parte del lote (nombre de marca,
-    ciudad sede, evento recurrente) para que NO cuenten como señal de que dos
-    noticias hablan del mismo hecho puntual. Sin esto, dos notas sobre hechos
-    distintos que solo comparten la marca/ciudad/evento terminan fusionadas
-    bajo el mismo subtema (sobre-agrupación)."""
-    if total_docs <= 0 or not words:
-        return set(words)
-    cap = max(3, round(total_docs * 0.07))
-    return {w for w in words if doc_freq.get(w, 0) <= cap}
+def cluster_similar_rows(
+    rows: List[dict],
+    km: dict,
+    brand_regexes: List[str],
+    brand: str = "",
+    aliases: Optional[List[str]] = None,
+) -> Dict[int, int]:
+    """Assign a group only when items are the same story.
 
+    Allowed signals (any one is enough):
+    1. Same or clearly similar Título
+    2. Título starts with the same first 3 or 4 words
+    3. Resumen / aclaración starts with the same first 3 or 4 words
 
-def cluster_similar_rows(rows: List[dict], km: dict, brand_regexes: List[str]) -> Dict[int, int]:
-    n = len(rows)
-    cluster_map = {}
-    clusters_rep = {}
-    current_cluster = 0
+    Shared client, región, vague tema or keyword overlap is NOT enough.
+    Grouping is optional: unrelated items keep their own cluster.
+    """
+    active_indices = [i for i in range(len(rows)) if not rows[i].get("is_duplicate")]
+    if not active_indices:
+        return {}
 
-    active_indices = [i for i in range(n) if not rows[i].get("is_duplicate")]
+    titles = {i: _row_title(rows[i], km) for i in active_indices}
+    resumenes = {i: _row_resumen(rows[i]) for i in active_indices}
 
-    # --- Paso 1: pre-cómputo de features + frecuencia de palabras en el lote ---
-    # Se calcula ANTES de agrupar, porque saber qué tan común es una palabra en
-    # todo el lote (no solo en un par de titulares) es lo que permite distinguir
-    # "SIAB", "Quindío", "terremoto" (distintivas de un hecho) de "cartagena",
-    # "universidad", "women", "tech" (se repiten en decenas de notas del cliente
-    # y no dicen nada sobre si dos notas son el mismo hecho).
-    features: Dict[int, dict] = {}
-    title_doc_freq = Counter()
-    ctx_doc_freq = Counter()
-    for i in active_indices:
-        t_raw = str(rows[i].get(km.get("titulo", "Título"), ""))
-        r_raw = str(rows[i].get("Resumen - Aclaracion") or rows[i].get("resumen corto") or "")
-        ctx_raw = str(rows[i].get("Contexto analizado") or "").strip()
-        if not ctx_raw or ctx_raw == "-":
-            ctx_raw = r_raw
+    dsu = _DSU(active_indices)
+    for a_idx, i in enumerate(active_indices):
+        for j in active_indices[a_idx + 1:]:
+            if should_group_news_items(
+                titles[i], resumenes[i], titles[j], resumenes[j],
+                brand=brand, aliases=aliases,
+            ):
+                dsu.union(i, j)
 
-        t_norm = normalize_text_for_matching(t_raw)
-        c_words = get_content_words_set(t_norm)
-        lead_words = get_lead_content_words(t_norm, n_words=3)
-        anchor = extract_event_anchor(t_raw)
-        r_norm = normalize_text_for_matching(r_raw[:350])
-        ctx_norm = normalize_text_for_matching(ctx_raw[:600])
-        ctx_words = get_content_words_set(ctx_norm)
+    return {i: dsu.find(i) for i in active_indices}
 
-        features[i] = {
-            "title_norm": t_norm,
-            "content_words": c_words,
-            "lead_words": lead_words,
-            "anchor": anchor,
-            "body_norm": r_norm,
-            "ctx_norm": ctx_norm,
-            "ctx_words": ctx_words,
-        }
-        for w in c_words:
-            title_doc_freq[w] += 1
-        for w in ctx_words:
-            ctx_doc_freq[w] += 1
-
-    total_docs = len(active_indices)
-    sorted_indices = sorted(active_indices, key=lambda idx: features[idx]["title_norm"])
-
-    for i in sorted_indices:
-        f = features[i]
-        t_norm, c_words, lead_words, anchor, r_norm = (
-            f["title_norm"], f["content_words"], f["lead_words"], f["anchor"], f["body_norm"]
-        )
-        ctx_norm, ctx_words = f["ctx_norm"], f["ctx_words"]
-        distinctive_c_words = _distinctive_subset(c_words, title_doc_freq, total_docs)
-        distinctive_ctx_words = _distinctive_subset(ctx_words, ctx_doc_freq, total_docs)
-
-        assigned = False
-        for cid, rep in clusters_rep.items():
-            rep_t = rep["title_norm"]
-            rep_words = rep["content_words"]
-            rep_lead = rep["lead_words"]
-            rep_anchor = rep["anchor"]
-            rep_r = rep["body_norm"]
-            rep_ctx_norm = rep["ctx_norm"]
-            rep_ctx_words = rep["ctx_words"]
-
-            if anchor and rep_anchor and anchor == rep_anchor:
-                cluster_map[i] = cid
-                assigned = True
-                break
-                
-            if len(lead_words) >= 3 and len(rep_lead) >= 3 and lead_words == rep_lead:
-                cluster_map[i] = cid
-                assigned = True
-                break
-
-            if len(lead_words) >= 2 and len(rep_lead) >= 2 and lead_words[:2] == rep_lead[:2]:
-                combined_lead_len = len(" ".join(lead_words[:2]))
-                if combined_lead_len >= 13:
-                    cluster_map[i] = cid
-                    assigned = True
-                    break
-
-            if t_norm and rep_t:
-                if t_norm in rep_t or rep_t in t_norm:
-                    cluster_map[i] = cid
-                    assigned = True
-                    break
-                min_len = min(len(t_norm), len(rep_t))
-                if min_len >= 18 and t_norm[:18] == rep_t[:18]:
-                    cluster_map[i] = cid
-                    assigned = True
-                    break
-                if fuzz.partial_ratio(t_norm, rep_t) >= 86:
-                    cluster_map[i] = cid
-                    assigned = True
-                    break
-
-            # Solapamiento de palabras del titular, EXCLUYENDO las que se repiten
-            # demasiado en el lote (ver _distinctive_subset). Antes esto fusionaba
-            # notas distintas que solo compartían el nombre de un evento/ciudad.
-            rep_distinctive = _distinctive_subset(rep_words, title_doc_freq, total_docs)
-            overlap = distinctive_c_words & rep_distinctive
-            if len(overlap) >= 4 or (len(overlap) >= 3 and any(re.search(rx, " ".join(overlap)) for rx in brand_regexes)):
-                cluster_map[i] = cid
-                assigned = True
-                break
-                
-            if t_norm and rep_t:
-                if fuzz.token_set_ratio(t_norm, rep_t) >= 70:
-                    cluster_map[i] = cid
-                    assigned = True
-                    break
-            
-            if r_norm and rep_r and len(r_norm) > 40 and len(rep_r) > 40:
-                if fuzz.token_set_ratio(r_norm, rep_r) >= 82:
-                    cluster_map[i] = cid
-                    assigned = True
-                    break
-
-            # --- Señal nueva: mismo hecho, titulares muy distintos ---
-            # "Contexto analizado" ya viene filtrado a lo que involucra a la
-            # marca, así que si dos notas comparten allí suficiente texto (aunque
-            # el titular de cada medio sea distinto), es el mismo hecho.
-            if ctx_norm and rep_ctx_norm and len(ctx_norm) > 40 and len(rep_ctx_norm) > 40:
-                if fuzz.token_set_ratio(ctx_norm, rep_ctx_norm) >= 63:
-                    cluster_map[i] = cid
-                    assigned = True
-                    break
-
-            rep_ctx_distinctive = _distinctive_subset(rep_ctx_words, ctx_doc_freq, total_docs)
-            ctx_overlap = distinctive_ctx_words & rep_ctx_distinctive
-            if len(ctx_overlap) >= 3 and len(distinctive_ctx_words) >= 3 and len(rep_ctx_distinctive) >= 3:
-                cluster_map[i] = cid
-                assigned = True
-                break
-
-        if not assigned:
-            cluster_map[i] = current_cluster
-            clusters_rep[current_cluster] = dict(f)
-            current_cluster += 1
-
-    return cluster_map
 
 class _DSU:
     """Union-Find simple para fusionar clústers de forma transitiva y
@@ -525,65 +713,14 @@ def canonicalize_subtopics(
     cluster_results: Dict[int, Tuple[str, str, str]],
     cluster_contexts: Optional[Dict[int, str]] = None,
 ) -> Dict[int, Tuple[str, str, str]]:
-    """Unifica subtemas equivalentes entre clústers y alinea el tema dentro de
-    cada grupo resultante.
+    """Do not merge clusters after classification.
 
-    Dos clústers se fusionan si:
-    1) el TEXTO del subtema que devolvió el LLM es muy parecido (como antes), o
-    2) el CONTEXTO de sus notas representativas ('Contexto analizado') es muy
-       parecido — esto cubre el caso real de la misma noticia republicada con
-       titulares distintos, donde cada clúster llamó al LLM por separado y el
-       LLM redactó el subtema con palabras distintas para el mismo hecho.
+    Previous versions glued clusters whose LLM subtema text or contexto
+    overlapped (token_set_ratio), which invented a shared subtema for
+    unrelated stories. Grouping is decided only by should_group_news_items.
     """
-    cids = list(cluster_results.keys())
-    dsu = _DSU(cids)
-    cluster_contexts = cluster_contexts or {}
-
-    norm_subs = {cid: normalize_text_for_matching(cluster_results[cid][2] or "") for cid in cids}
-    norm_ctx = {cid: normalize_text_for_matching((cluster_contexts.get(cid) or "")[:600]) for cid in cids}
-
-    for i in range(len(cids)):
-        for j in range(i + 1, len(cids)):
-            cid1, cid2 = cids[i], cids[j]
-            if dsu.find(cid1) == dsu.find(cid2):
-                continue
-            n1, n2 = norm_subs[cid1], norm_subs[cid2]
-            same_subtema_text = bool(n1) and bool(n2) and (
-                n1 == n2 or fuzz.token_set_ratio(n1, n2) >= 70 or fuzz.token_sort_ratio(n1, n2) >= 70
-            )
-            c1, c2 = norm_ctx[cid1], norm_ctx[cid2]
-            same_fact_context = (
-                len(c1) > 40 and len(c2) > 40 and fuzz.token_set_ratio(c1, c2) >= 63
-            )
-            if same_subtema_text or same_fact_context:
-                dsu.union(cid1, cid2)
-
-    groups: Dict[int, List[int]] = {}
-    for cid in cids:
-        groups.setdefault(dsu.find(cid), []).append(cid)
-
-    final_results = {}
-    for _, members in groups.items():
-        sub_counts = Counter(cluster_results[m][2] for m in members if cluster_results[m][2])
-        tema_counts = Counter(cluster_results[m][1] for m in members if cluster_results[m][1])
-        if sub_counts:
-            max_count = max(sub_counts.values())
-            # Empate: se prefiere el subtema más específico (más palabras), y
-            # como último criterio el orden alfabético, para que el resultado
-            # sea determinista entre corridas.
-            best_sub = min(
-                (s for s, c in sub_counts.items() if c == max_count),
-                key=lambda s: (-len(s.split()), s),
-            )
-        else:
-            best_sub = ""
-        best_tema = tema_counts.most_common(1)[0][0] if tema_counts else ""
-
-        for m in members:
-            tono, _, _ = cluster_results[m]
-            final_results[m] = (tono, best_tema or cluster_results[m][1], best_sub or cluster_results[m][2])
-
-    return final_results
+    del cluster_contexts
+    return dict(cluster_results)
 
 def _labels_too_close(a: str, b: str) -> bool:
     if not a or not b:
@@ -597,22 +734,88 @@ def _labels_too_close(a: str, b: str) -> bool:
     return fuzz.ratio(na, nb) >= 80 or fuzz.token_set_ratio(na, nb) >= 85
 
 
+def _title_event_hints(title: str) -> Set[str]:
+    low = unidecode(title or "").lower()
+    return {h for h in TITLE_EVENT_HINTS if h in low}
+
+
+def _phrase_covers_title_event(phrase: str, title: str) -> bool:
+    hints = _title_event_hints(title)
+    if not hints:
+        return True
+    plow = unidecode(phrase or "").lower()
+    return any(h in plow for h in hints)
+
+
+def _event_phrase_from_title(title: str, brand: str) -> str:
+    if not _title_event_hints(title):
+        return ""
+    phrase = _fallback_from_title(title)
+    if _phrase_covers_title_event(phrase, title):
+        brand_toks = _brand_token_set(brand)
+        content = {unidecode(w.lower()) for w in phrase.split() if unidecode(w.lower()) not in STOPWORDS_ES}
+        if content and not content.issubset(brand_toks):
+            return phrase
+    return ""
+
+
 def ensure_subtema_distinct_from_tema(
     tema: str,
     subtema: str,
     brand: str,
     title: str,
     ctx: str,
+    aliases: Optional[List[str]] = None,
 ) -> str:
-    """Si el subtema colisiona con un tema PKL, reusa el mismo limpiado específico (no recorta calidad a título)."""
-    cleaned = clean_subtema(subtema or "", brand, title)
-    if cleaned and not _labels_too_close(tema, cleaned) and len(cleaned.split()) >= 2:
-        return cleaned
-    for candidate in (ctx, title):
-        alt = clean_subtema(str(candidate or ""), brand, title)
-        if alt and not _labels_too_close(tema, alt) and len(alt.split()) >= 2:
-            return alt
-    return cleaned or subtema or _fallback_from_title(title)
+    """Keep a 4–7 word fact noun phrase from this story. Never a lead-clause scrap."""
+    llm_clean = clean_subtema(subtema or "", brand, title)
+
+    def _strong(phrase: str) -> bool:
+        if not phrase:
+            return False
+        words = phrase.split()
+        if len(words) < MIN_SUBTEMA_WORDS or len(words) > MAX_SUBTEMA_WORDS:
+            return False
+        if _is_lead_clause_scrap(words) or _has_echoed_content_pair(words):
+            return False
+        if _labels_too_close(tema, phrase) or _is_title_scrap(phrase, title):
+            return False
+        brand_toks = _brand_token_set(brand)
+        content = {unidecode(w.lower()) for w in words if unidecode(w.lower()) not in STOPWORDS_ES}
+        if content and content.issubset(brand_toks):
+            return False
+        if not _phrase_covers_title_event(phrase, title):
+            return False
+        return True
+
+    ctx_ok = bool(ctx) and str(ctx).strip() not in ("", "-")
+    if _strong(llm_clean) and (
+        not ctx_ok or subtema_supported_by_context(llm_clean, ctx, brand, aliases)
+    ):
+        completed = _complete_proper_names_from_context(llm_clean, ctx)
+        completed = clean_subtema(completed, brand, title) or completed
+        if _strong(completed) and (
+            not ctx_ok or subtema_supported_by_context(completed, ctx, brand, aliases)
+        ):
+            return completed
+        return llm_clean
+
+    title_event = _event_phrase_from_title(title, brand)
+    if title_event and MIN_SUBTEMA_WORDS <= len(title_event.split()) <= MAX_SUBTEMA_WORDS:
+        return title_event
+
+    ctx_phrase = _window_from_context(ctx, tema, title, brand)
+    if ctx_phrase:
+        ctx_phrase = _complete_proper_names_from_context(ctx_phrase, ctx)
+        ctx_phrase = ctx_phrase.capitalize()
+    if _strong(ctx_phrase):
+        return ctx_phrase
+    if ctx_phrase and not _is_lead_clause_scrap(ctx_phrase.split()) and not _labels_too_close(tema, ctx_phrase):
+        if MIN_SUBTEMA_WORDS <= len(ctx_phrase.split()) <= MAX_SUBTEMA_WORDS:
+            return ctx_phrase
+    if llm_clean and _strong(llm_clean):
+        return llm_clean
+    return ctx_phrase or llm_clean or _fallback_from_title(title)
 
 
 def _call_openai_cluster(
@@ -650,9 +853,12 @@ def _call_openai_cluster(
         n += 1
 
     subtema_rule = (
-        f'{n}. "subtema": HECHO ESPECÍFICO (frase nominal coherente en español colombiano, '
-        "preferible 4 a 6 palabras. Sin comas ni puntos. "
-        'PROHIBIDO usar "Mención", collage de keywords o recortar el titular).'
+        f'{n}. "subtema": HECHO ESPECÍFICO de ESTA noticia (frase nominal coherente '
+        "en español colombiano, 4 a 7 palabras, completa, sin cortar nombres propios). "
+        "Tómalo del título + contexto analizado de esta fila. "
+        "PROHIBIDO collage de keywords, recortar el titular, copiar el tema, "
+        "usar la marca del cliente como subtema, o inventar un subtema compartido "
+        "para forzar agrupación con otras notas."
     )
     steps.append(subtema_rule)
     json_fields.append('"subtema": "..."')
@@ -714,7 +920,7 @@ Responde estrictamente en JSON:
         if request_tone:
             tono_raw = str(data.get("tono", "Neutro")).strip().capitalize()
             tono = tono_raw if tono_raw in ["Positivo", "Negativo", "Neutro"] else "Neutro"
-            if check_positive_institutional_override(ctx):
+            if check_positive_institutional_override(ctx, brand, aliases):
                 tono = "Positivo"
         else:
             tono = "Neutro"
@@ -726,7 +932,9 @@ Responde estrictamente en JSON:
             tema = ensure_different_tema_subtema(tema, subtema, ctx)
         else:
             tema = (pkl_theme or "").strip() or "Gestión Institucional"
-            subtema = ensure_subtema_distinct_from_tema(tema, subtema, brand, title_ref, ctx)
+            subtema = ensure_subtema_distinct_from_tema(
+                tema, subtema, brand, title_ref, ctx, aliases
+            )
 
         return tono, tema, subtema
     except Exception as e:
@@ -736,8 +944,10 @@ Responde estrictamente en JSON:
             tema_fb = ensure_different_tema_subtema("Gestión Institucional", sub_fb, ctx)
         else:
             tema_fb = (pkl_theme or "").strip() or "Gestión Institucional"
-            sub_fb = ensure_subtema_distinct_from_tema(tema_fb, sub_fb, brand, title_ref, ctx)
-        tono_fb = "Positivo" if check_positive_institutional_override(ctx) else "Neutro"
+            sub_fb = ensure_subtema_distinct_from_tema(
+                tema_fb, sub_fb, brand, title_ref, ctx, aliases
+            )
+        tono_fb = "Positivo" if check_positive_institutional_override(ctx, brand, aliases) else "Neutro"
         return tono_fb, tema_fb, sub_fb
 
 def enrich_rows_with_ai(
@@ -776,7 +986,9 @@ def enrich_rows_with_ai(
 
     if progress_callback:
         progress_callback(74, "Agrupando eventos y noticias similares (ordenamiento por titular)…")
-    cluster_map = cluster_similar_rows(rows, km, brand_regexes)
+    cluster_map = cluster_similar_rows(
+        rows, km, brand_regexes, brand=brand, aliases=aliases
+    )
     
     unique_clusters = sorted(set(cluster_map.values()))
     total_clusters = len(unique_clusters)
@@ -828,14 +1040,15 @@ def enrich_rows_with_ai(
                 tono = pkl_tone
             if pkl_theme:
                 tema = pkl_theme
-                sample_idx = cluster_to_sample_idx[cid]
-                subtema = ensure_subtema_distinct_from_tema(
-                    tema,
-                    subtema,
-                    brand,
-                    str(rows[sample_idx].get(km.get("titulo", "Título"), "")),
-                    rows[sample_idx].get("Contexto analizado", ""),
-                )
+            sample_idx = cluster_to_sample_idx[cid]
+            subtema = ensure_subtema_distinct_from_tema(
+                tema,
+                subtema,
+                brand,
+                str(rows[sample_idx].get(km.get("titulo", "Título"), "")),
+                rows[sample_idx].get("Contexto analizado", ""),
+                aliases,
+            )
             cluster_results[cid] = (tono, tema, subtema)
             completed += 1
             if progress_callback and (completed % 15 == 0 or completed == total_clusters):
@@ -872,11 +1085,12 @@ def enrich_rows_with_ai(
 
         if theme_model is None:
             tema = ensure_different_tema_subtema(tema, subtema, row.get("Contexto analizado", ""))
-        else:
+        elif sum(1 for v in cluster_map.values() if v == cid) <= 1:
             subtema = ensure_subtema_distinct_from_tema(
                 tema, subtema, brand,
                 str(row.get(km.get("titulo", "Título"), "")),
                 row.get("Contexto analizado", ""),
+                aliases,
             )
 
         row["Tono_IA"] = tono
