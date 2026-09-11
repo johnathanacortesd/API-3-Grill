@@ -680,7 +680,9 @@ def generate_output_excel(rows, km, progress: ProgressCb = None, columns_to_use:
     fmt_plain_id = wb.add_format({"num_format": "0"})
 
     for i, col_name in enumerate(cols):
-        if col_name in ["Título", "Resumen - Aclaracion", "resumen corto", "Contexto analizado"]:
+        if col_name in ["Título", "Resumen - Aclaracion", "resumen corto", "Contexto analizado"] or (
+            col_name and ("extracto" in col_name.lower() or str(col_name).startswith("Nombre y cargo"))
+        ):
             ws.set_column(i, i, 55)
         elif col_name in ["Link Nota", "Link (Streaming - Imagen)"]:
             ws.set_column(i, i, 15)
