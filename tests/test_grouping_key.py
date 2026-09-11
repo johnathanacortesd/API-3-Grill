@@ -1,8 +1,10 @@
 # ======================================
 # Grouping is optional: only same/similar título or shared first 3–4 words
 # ======================================
+import hashlib
 import os
 import sys
+import time
 import unittest
 from unittest.mock import patch
 
@@ -268,6 +270,130 @@ class EnrichBroadcastTests(unittest.TestCase):
         self.assertNotEqual(out[0]["Subtema_IA"], out[1]["Subtema_IA"])
         self.assertNotIn("matrícula", out[0]["Subtema_IA"].lower())
         self.assertNotIn("matricula", out[0]["Subtema_IA"].lower())
+
+
+class HashClusteringEquivalenceTests(unittest.TestCase):
+    def test_hash_partitions_match_pairwise_on_small_batch(self):
+        rows = [
+            _row("Feria Educativa Inspírate: 10 universidades", "lista"),
+            _row("Feria Educativa Inspírate: 3 días con becas", "lista"),
+            _row("Congreso de patrimonio cultural en Cartagena", "congreso"),
+            _row("Incremento en matrícula universitaria en Cartagena", "matricula"),
+            _row("Women in Tech Latam Awards 2026 abren convocatoria", "women"),
+            _row("Women in Tech Latam Awards 2026 - NOTICIAS VITAL", "women"),
+            _row(
+                "Cátedra FICCI-UTB inaugura temporada",
+                "La Cátedra FICCI-UTB inaugura temporada académica.",
+            ),
+            _row(
+                "Cátedra FICCIUTB inaugura temporada",
+                "Arranca la Cátedra FICCIUTB.",
+            ),
+            _row(
+                "Gobernadora Lucy García entregó 200 becas en Sincelejo",
+                "Entrega de becas.",
+            ),
+            _row(
+                "Gobernadora Lucy García inauguró el hospital de Sampués",
+                "Inauguración hospitalaria.",
+            ),
+        ]
+        rx = generate_brand_variants(BRAND, ALIASES)
+        hashed = cluster_similar_rows(rows, KM, rx, brand=BRAND, aliases=ALIASES)
+
+        from ai_analyzer import _DSU, should_group_news_items
+
+        idxs = list(range(len(rows)))
+        dsu = _DSU(idxs)
+        for i in idxs:
+            for j in idxs[i + 1:]:
+                if should_group_news_items(
+                    rows[i]["Título"],
+                    rows[i]["Resumen - Aclaracion"],
+                    rows[j]["Título"],
+                    rows[j]["Resumen - Aclaracion"],
+                    brand=BRAND,
+                    aliases=ALIASES,
+                ):
+                    dsu.union(i, j)
+        pairwise = {i: dsu.find(i) for i in idxs}
+
+        def _parts(cm):
+            groups = {}
+            for i, cid in cm.items():
+                groups.setdefault(cid, set()).add(i)
+            return {frozenset(g) for g in groups.values()}
+
+        self.assertEqual(_parts(hashed), _parts(pairwise))
+
+
+class LargeSheetClusteringTests(unittest.TestCase):
+    """Sucre xlsx is ~700–1500 rows; grouping must finish without hanging at 74%."""
+
+    def test_clusters_500_plus_sucre_like_rows_without_hang(self):
+        long_body = (
+            "La Gobernación de Sucre y la gobernadora Lucy Inés García Montes "
+            "presentaron un informe de gestión territorial. " * 80
+        )
+        rows = []
+        for i in range(800):
+            digest = hashlib.md5(f"sucre-{i}".encode("utf-8")).hexdigest()
+            rows.append(
+                {
+                    "Título": f"Registro {i:04d} {digest} Sincelejo",
+                    "Resumen - Aclaracion": "",
+                    "CuerpoEs": f"Hecho unico {digest}. " + long_body,
+                    "is_duplicate": False,
+                }
+            )
+        shared = "Feria Educativa Inspírate abre inscripciones 2026"
+        for _ in range(8):
+            rows.append(_row(shared, "Cobertura de la feria educativa."))
+        rows.append(
+            _row(
+                "Gobernadora Lucy García entregó 200 becas en Sincelejo",
+                "Entrega de becas universitarias en Sincelejo.",
+            )
+        )
+        rows.append(
+            _row(
+                "Gobernadora Lucy García inauguró el hospital de Sampués",
+                "Inauguración del hospital de Sampués.",
+            )
+        )
+        self.assertGreaterEqual(len(rows), 500)
+
+        ticks = []
+
+        def on_progress(pct, msg):
+            ticks.append((pct, msg))
+
+        t0 = time.perf_counter()
+        rx = generate_brand_variants(SUCRE_BRAND, SUCRE_ALIASES)
+        cm = cluster_similar_rows(
+            rows,
+            KM,
+            rx,
+            brand=SUCRE_BRAND,
+            aliases=SUCRE_ALIASES,
+            progress_callback=on_progress,
+            progress_pct=74,
+        )
+        elapsed = time.perf_counter() - t0
+        self.assertLess(
+            elapsed,
+            8.0,
+            f"clustering {len(rows)} rows hung or was too slow: {elapsed:.2f}s",
+        )
+        self.assertEqual(len(cm), len(rows))
+        unique_registros = {cm[i] for i in range(800)}
+        self.assertEqual(len(unique_registros), 800)
+        feria_ids = {cm[i] for i in range(800, 808)}
+        self.assertEqual(len(feria_ids), 1)
+        self.assertNotEqual(cm[808], cm[809])
+        self.assertTrue(ticks)
+        self.assertTrue(any(p == 74 for p, _ in ticks))
+        self.assertTrue(any("Agrupando eventos" in (m or "") for _, m in ticks))
 
 
 if __name__ == "__main__":
