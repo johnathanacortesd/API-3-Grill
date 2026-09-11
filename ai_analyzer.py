@@ -5,6 +5,7 @@ import os
 import re
 import json
 import logging
+from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Dict, Tuple, Optional, Callable, Set
 import pandas as pd
@@ -359,6 +360,23 @@ def titles_clearly_similar(title_a: str, title_b: str, brand_tokens: Optional[Se
     return False
 
 
+# Grouping only needs the opening of resumen/cuerpo (first 3–4 words).
+# Sucre xlsx often stores the full article in CuerpoEs; all-pairs tokenization
+# of that body is what hung Streamlit at ~74%.
+_RESUMEN_GROUPING_CHARS = 280
+_TITLE_PREFIX_MIN = 24
+_FUZZY_RATIO_MIN = 88
+_FUZZY_PREFIX_CHARS = 8
+_FUZZY_FULL_BUCKET = 48
+
+
+def _resumen_for_grouping(text: str) -> str:
+    s = str(text or "")
+    if len(s) > _RESUMEN_GROUPING_CHARS:
+        return s[:_RESUMEN_GROUPING_CHARS]
+    return s
+
+
 def should_group_news_items(
     title_a: str,
     resumen_a: str,
@@ -373,7 +391,8 @@ def should_group_news_items(
         return True
     if _same_opening_lead(title_a, title_b, brand_tokens):
         return True
-    if resumen_a and resumen_b and _same_opening_lead(resumen_a, resumen_b, brand_tokens):
+    ra, rb = _resumen_for_grouping(resumen_a), _resumen_for_grouping(resumen_b)
+    if ra and rb and _same_opening_lead(ra, rb, brand_tokens):
         return True
     return False
 
@@ -390,6 +409,35 @@ def _row_resumen(row: dict) -> str:
         or row.get("CuerpoEs")
         or ""
     )
+
+
+def _content_not_brand_only(words: List[str], brand_tokens: Set[str]) -> bool:
+    content = [w for w in words if w not in STOPWORDS_ES]
+    return bool(content) and not set(content).issubset(brand_tokens)
+
+
+def _lead_bucket_keys(text: str, brand_tokens: Set[str]) -> List[Tuple]:
+    """Hashable first-3 / first-4 word keys (marca-stripped and raw)."""
+    if not text:
+        return []
+    keys: List[Tuple] = []
+    stripped = _lead_tokens_for_grouping(text, brand_tokens)
+    if len(stripped) >= 3:
+        keys.append(("s3", tuple(stripped[:3])))
+    raw = _surface_tokens(text)
+    if len(raw) >= 4 and _content_not_brand_only(raw[:4], brand_tokens):
+        keys.append(("r4", tuple(raw[:4])))
+    if len(raw) >= 3 and _content_not_brand_only(raw[:3], brand_tokens):
+        keys.append(("r3", tuple(raw[:3])))
+    return keys
+
+
+def _dsu_union_all(dsu: "_DSU", members: List[int]) -> None:
+    if len(members) < 2:
+        return
+    head = members[0]
+    for other in members[1:]:
+        dsu.union(head, other)
 
 
 def _has_echoed_content_pair(words: List[str]) -> bool:
@@ -658,6 +706,8 @@ def cluster_similar_rows(
     brand_regexes: List[str],
     brand: str = "",
     aliases: Optional[List[str]] = None,
+    progress_callback: Optional[Callable[[int, str], None]] = None,
+    progress_pct: int = 74,
 ) -> Dict[int, int]:
     """Assign a group only when items are the same story.
 
@@ -668,23 +718,85 @@ def cluster_similar_rows(
 
     Shared client, región, vague tema or keyword overlap is NOT enough.
     Grouping is optional: unrelated items keep their own cluster.
+
+    Complexity: hash maps on compact titles and first-3/4-word keys (O(n)),
+    plus a bounded fuzzy pass inside small prefix buckets. Never all-pairs
+    on the full sheet (Sucre xlsx is often 700–1500 rows).
     """
+    _ = brand_regexes
     active_indices = [i for i in range(len(rows)) if not rows[i].get("is_duplicate")]
     if not active_indices:
         return {}
 
-    titles = {i: _row_title(rows[i], km) for i in active_indices}
-    resumenes = {i: _row_resumen(rows[i]) for i in active_indices}
+    def _emit(pct: int, msg: str) -> None:
+        if progress_callback:
+            progress_callback(pct, msg)
 
+    _emit(progress_pct, "Agrupando eventos y noticias similares (ordenamiento por titular)…")
+
+    brand_tokens = _brand_token_set(brand, aliases)
+    n_active = len(active_indices)
     dsu = _DSU(active_indices)
-    for a_idx, i in enumerate(active_indices):
-        for j in active_indices[a_idx + 1:]:
-            if should_group_news_items(
-                titles[i], resumenes[i], titles[j], resumenes[j],
-                brand=brand, aliases=aliases,
-            ):
-                dsu.union(i, j)
 
+    compact_to_idxs: Dict[str, List[int]] = defaultdict(list)
+    lead_buckets: Dict[Tuple, List[int]] = defaultdict(list)
+
+    for i in active_indices:
+        title = _row_title(rows[i], km)
+        resumen = _resumen_for_grouping(_row_resumen(rows[i]))
+        compact = _compact_title_key(title)
+        if compact:
+            compact_to_idxs[compact].append(i)
+        for key in _lead_bucket_keys(title, brand_tokens):
+            lead_buckets[key].append(i)
+        for key in _lead_bucket_keys(resumen, brand_tokens):
+            lead_buckets[("res",) + key].append(i)
+
+    _emit(
+        progress_pct,
+        f"Agrupando eventos y noticias similares ({n_active} notas, claves de titular)…",
+    )
+
+    for idxs in compact_to_idxs.values():
+        _dsu_union_all(dsu, idxs)
+    for idxs in lead_buckets.values():
+        _dsu_union_all(dsu, idxs)
+
+    # Longer compact title that starts with a shorter one (≥24 chars).
+    sorted_keys = sorted(compact_to_idxs)
+    for i, ka in enumerate(sorted_keys):
+        if len(ka) < _TITLE_PREFIX_MIN:
+            continue
+        content = [w for w in ka.split() if w not in STOPWORDS_ES]
+        if not content or set(content).issubset(brand_tokens):
+            continue
+        head = compact_to_idxs[ka][0]
+        for kb in sorted_keys[i + 1:]:
+            if not kb.startswith(ka):
+                break
+            dsu.union(head, compact_to_idxs[kb][0])
+
+    # fuzz.ratio only inside small prefix buckets (hyphen / typo, e.g. FICCI-UTB
+    # vs FICCIUTB). Large buckets are brand-prefixed Sucre sheets — skip fuzzy
+    # rather than chaining near-neighbors into one mega-group.
+    fuzzy_buckets: Dict[str, List[str]] = defaultdict(list)
+    for ka in compact_to_idxs:
+        if len(ka) >= _TITLE_PREFIX_MIN:
+            fuzzy_buckets[ka[:_FUZZY_PREFIX_CHARS]].append(ka)
+
+    for keys in fuzzy_buckets.values():
+        if len(keys) < 2 or len(keys) > _FUZZY_FULL_BUCKET:
+            continue
+        keys.sort()
+        for a in range(len(keys)):
+            for b in range(a + 1, len(keys)):
+                if fuzz.ratio(keys[a], keys[b]) >= _FUZZY_RATIO_MIN:
+                    dsu.union(compact_to_idxs[keys[a]][0], compact_to_idxs[keys[b]][0])
+
+    _emit(
+        progress_pct,
+        f"Agrupando eventos y noticias similares ({n_active} notas, grupos listos)…",
+    )
     return {i: dsu.find(i) for i in active_indices}
 
 
@@ -984,10 +1096,14 @@ def enrich_rows_with_ai(
             )
             row["Contexto analizado"] = ctx
 
-    if progress_callback:
-        progress_callback(74, "Agrupando eventos y noticias similares (ordenamiento por titular)…")
     cluster_map = cluster_similar_rows(
-        rows, km, brand_regexes, brand=brand, aliases=aliases
+        rows,
+        km,
+        brand_regexes,
+        brand=brand,
+        aliases=aliases,
+        progress_callback=progress_callback,
+        progress_pct=74,
     )
     
     unique_clusters = sorted(set(cluster_map.values()))
