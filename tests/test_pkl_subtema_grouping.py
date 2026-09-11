@@ -9,6 +9,7 @@ import numpy as np
 from ai_analyzer import (
     enrich_rows_with_ai,
     ensure_subtema_distinct_from_tema,
+    is_keyword_collage,
 )
 from pipeline import KEY_MAP
 from pkl_classifier import apply_pkl_classifiers, classification_plan
@@ -87,7 +88,7 @@ class SubtemaQualityWithTemaPklTests(unittest.TestCase):
         sub = ensure_subtema_distinct_from_tema("Mención", "Mención", brand, title, ctx)
         low = sub.strip().lower()
         self.assertGreaterEqual(len(sub.split()), 4)
-        self.assertLessEqual(len(sub.split()), 7)
+        self.assertLessEqual(len(sub.split()), 6)
         self.assertFalse(low.startswith("ese barrio"))
         self.assertFalse(low.startswith("de ese"))
         self.assertNotIn("salió", low)
@@ -98,7 +99,7 @@ class SubtemaQualityWithTemaPklTests(unittest.TestCase):
             "formación" in low or "formacion" in low or "abogado" in low or "académic" in low
         )
 
-    def test_simon_bolivar_llm_phrase_completes_name_within_seven(self):
+    def test_simon_bolivar_llm_phrase_completes_name_within_six(self):
         ctx = (
             "De ese barrio salió, primero, un joven que se hizo abogado "
             "en la Universidad Simón Bolívar de Barranquilla."
@@ -112,13 +113,13 @@ class SubtemaQualityWithTemaPklTests(unittest.TestCase):
             ctx,
         )
         words = sub.split()
-        self.assertLessEqual(len(words), 7)
+        self.assertLessEqual(len(words), 6)
         self.assertGreaterEqual(len(words), 4)
         self.assertIn("bolívar", sub.lower())
         self.assertTrue(sub.lower().startswith("formación académica"))
         self.assertNotIn("ese barrio", sub.lower())
 
-    def test_subtema_max_seven_words_and_rejects_explicit_lead_scrap(self):
+    def test_subtema_max_six_words_and_rejects_explicit_lead_scrap(self):
         ctx = (
             "De ese barrio salió, primero, un joven que se hizo abogado "
             "en la Universidad Simón Bolívar de Barranquilla."
@@ -131,7 +132,7 @@ class SubtemaQualityWithTemaPklTests(unittest.TestCase):
             "Historia de un egresado",
             ctx,
         )
-        self.assertLessEqual(len(sub.split()), 7)
+        self.assertLessEqual(len(sub.split()), 6)
         self.assertNotEqual(sub.strip().lower(), "ese barrio salió primero un joven")
         self.assertIn("simón bolívar", sub.lower())
 
@@ -140,7 +141,7 @@ class SubtemaQualityWithTemaPklTests(unittest.TestCase):
         ctx = "La universidad anunció diálogo con el rector sobre nuevas becas de posgrado."
         sub = ensure_subtema_distinct_from_tema("Mención", "Mención", "UdeA", title, ctx)
         self.assertGreaterEqual(len(sub.split()), 4)
-        self.assertLessEqual(len(sub.split()), 7)
+        self.assertLessEqual(len(sub.split()), 6)
         self.assertNotEqual(sub.strip().lower(), "gobierno presenta reforma tributaria en el")
         self.assertNotEqual(sub.strip().lower(), title.lower())
         self.assertIn("becas", sub.lower())
@@ -244,7 +245,7 @@ class SubtemaQualityWithTemaPklTests(unittest.TestCase):
         self.assertEqual(mock_llm.call_count, 1)
         self.assertEqual(out[0]["Tema_IA"], "Mención")
         self.assertEqual(out[0]["Subtema_IA"], out[1]["Subtema_IA"])
-        self.assertLessEqual(len(out[0]["Subtema_IA"].split()), 7)
+        self.assertLessEqual(len(out[0]["Subtema_IA"].split()), 6)
         self.assertIn("simón bolívar", out[0]["Subtema_IA"].lower())
         self.assertNotIn("ese barrio", out[0]["Subtema_IA"].lower())
 
@@ -264,6 +265,22 @@ class PklGroupingWithoutAiTests(unittest.TestCase):
         self.assertEqual(out[0]["Tema_IA"], out[1]["Tema_IA"])
         self.assertEqual(out[0]["Subtema_IA"], "Apertura de sede norte")
         self.assertEqual(out[1]["Subtema_IA"], "Apertura de sede norte")
+
+
+class SubtemaCollageGuardTests(unittest.TestCase):
+    def test_keyword_list_is_collage_coherent_np_is_not(self):
+        self.assertTrue(is_keyword_collage("Mención rector becas posgrado cali"))
+        self.assertFalse(is_keyword_collage("Diálogo con el rector sobre becas"))
+        sub = ensure_subtema_distinct_from_tema(
+            "Mención",
+            "Mención rector becas posgrado cali",
+            "UdeA",
+            "Diálogo con el rector sobre nuevas becas",
+            "La universidad anunció diálogo con el rector sobre nuevas becas de posgrado.",
+        )
+        self.assertLessEqual(len(sub.split()), 6)
+        self.assertFalse(is_keyword_collage(sub, "Diálogo con el rector sobre nuevas becas"))
+        self.assertIn("beca", sub.lower())
 
 
 if __name__ == "__main__":
