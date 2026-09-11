@@ -113,7 +113,10 @@ html,body,[data-testid="stApp"]{
 [data-testid="stFileUploader"]{border:1.5px dashed var(--border)!important;border-radius:var(--r)!important;}
 [data-testid="stFileUploader"]:hover{border-color:var(--accent)!important;background:var(--accent-bg)!important;}
 .stButton>button,[data-testid="stDownloadButton"]>button{border-radius:100px!important;font-family:'Google Sans',sans-serif!important;}
-.stButton>button[kind="primary"],[data-testid="stDownloadButton"]>button[kind="primary"]{background:var(--accent)!important;border:none!important;color:#fff!important;}
+.stButton>button[kind="primary"],[data-testid="stDownloadButton"]>button[kind="primary"],
+[data-testid="stFormSubmitButton"] button,[data-testid="baseButton-primary"]{
+    background:var(--accent)!important;border:none!important;color:#fff!important;
+}
 .success-banner{background:var(--success-bg);border:1px solid var(--green-bdr);border-left:4px solid var(--green);border-radius:var(--r2);padding:0.8rem 1.2rem;margin:0.5rem 0 0.8rem;display:flex;align-items:center;gap:0.8rem;}
 .success-icon{width:34px;height:34px;background:linear-gradient(135deg,#059669,#047857);border-radius:50%;display:flex;align-items:center;justify-content:center;color:white;flex-shrink:0;}
 .success-title{font-family:'Google Sans',sans-serif;font-size:1rem;font-weight:700;color:var(--success-title)}
