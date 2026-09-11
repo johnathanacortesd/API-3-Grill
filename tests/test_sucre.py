@@ -26,6 +26,7 @@ from sucre_analyzer import (
     SUCRE_OUTPUT_COLUMNS,
     analyze_article,
     enforce_people_only,
+    format_extract,
     heuristic_analyze,
     is_entity_only_label,
     is_filler,
@@ -67,6 +68,22 @@ RENDON_BODY = (
     "puede replicar el modelo de vías terciarias del occidente antioqueño."
 )
 
+MADURO_BODY = (
+    "A través de su cuenta de X, la gobernadora de Sucre, Lucy García Montes, "
+    "aseguró que la captura de Nicolás Maduro debe convertirse en un punto de "
+    "partida para reconstruir el rumbo en Venezuela y devolverle la esperanza a la gente."
+)
+
+MADURO_MID_CLAUSE = (
+    "que la captura de Nicolás Maduro debe convertirse en un punto de partida"
+)
+
+EXT_MADURO_BODY = (
+    "A través de su cuenta de X, el senador Andrés Pérez aseguró que la gobernadora "
+    "de Sucre debe convertir la captura de Nicolás Maduro en un punto de partida "
+    "para reconstruir el rumbo en Venezuela."
+)
+
 
 class VerbatimRulesTests(unittest.TestCase):
     def test_recover_exact_span(self):
@@ -90,6 +107,75 @@ class VerbatimRulesTests(unittest.TestCase):
         self.assertTrue(is_filler("ninguno"))
         self.assertTrue(is_filler("—"))
         self.assertFalse(is_filler("Lucy Inés García Montes, Gobernadora de Sucre"))
+
+
+class ExtractClauseExpandTests(unittest.TestCase):
+    def test_maduro_x_mid_clause_expands_to_sentence_start(self):
+        got = format_extract(MADURO_MID_CLAUSE, MADURO_BODY)
+        self.assertTrue(got.startswith("A través"))
+        self.assertTrue(got[0].isupper())
+        self.assertTrue(got.endswith("."))
+        self.assertIn("Lucy García Montes", got)
+        self.assertIn("aseguró que la captura de Nicolás Maduro", got)
+        self.assertIn("devolverle la esperanza a la gente.", got)
+        self.assertTrue(got[:-1] in MADURO_BODY or got in MADURO_BODY)
+
+    def test_capitalizes_first_letter_and_appends_period(self):
+        src = "la gobernadora de Sucre anunció la pavimentación de la vía"
+        got = format_extract(src, src)
+        self.assertEqual(got, "La gobernadora de Sucre anunció la pavimentación de la vía.")
+        self.assertTrue(got[0].isupper())
+        self.assertTrue(got.endswith("."))
+
+    def test_keeps_existing_exclamation(self):
+        src = "¡Lucy García Montes inauguró el hospital de Sampués!"
+        got = format_extract("inauguró el hospital de Sampués", src)
+        self.assertEqual(got, src)
+
+    def test_heuristic_maduro_starts_at_full_clause(self):
+        out = heuristic_analyze("Captura de Maduro", MADURO_BODY)
+        extract = out[COL_INT_PROPIA]
+        self.assertIn(LUCY_CANONICAL_NAME, out[COL_PROPIOS])
+        self.assertTrue(extract.startswith("A través"))
+        self.assertTrue(extract[0].isupper())
+        self.assertTrue(extract.endswith("."))
+        self.assertIn("cuenta de X", extract)
+
+    def test_llm_mid_clause_is_expanded_on_merge(self):
+        heuristic = heuristic_analyze("Captura de Maduro", MADURO_BODY)
+        llm = {
+            "tono": "Positivo",
+            "nombre_cargo_propios": "Lucy Inés García Montes, Gobernadora de Sucre",
+            "intervencion_propia": MADURO_MID_CLAUSE,
+            "nombre_cargo_externos": "",
+            "mencion_externa": "",
+        }
+        merged = merge_analysis(llm, heuristic, "Captura de Maduro", MADURO_BODY)
+        extract = merged[COL_INT_PROPIA]
+        self.assertTrue(extract.startswith("A través"))
+        self.assertTrue(extract[0].isupper())
+        self.assertTrue(extract.endswith("."))
+        self.assertNotEqual(extract[:3].lower(), "que")
+        self.assertIn("Lucy García Montes", extract)
+
+    def test_external_mid_clause_also_expands(self):
+        heuristic = heuristic_analyze("Senador sobre Maduro", EXT_MADURO_BODY)
+        llm = {
+            "tono": "Neutro",
+            "nombre_cargo_propios": "",
+            "intervencion_propia": "",
+            "nombre_cargo_externos": "Andrés Pérez, senador",
+            "mencion_externa": (
+                "que la gobernadora de Sucre debe convertir la captura de Nicolás Maduro"
+            ),
+        }
+        merged = merge_analysis(llm, heuristic, "Senador sobre Maduro", EXT_MADURO_BODY)
+        extract = merged[COL_MENCION_EXT]
+        self.assertIn("Andrés Pérez", merged[COL_EXTERNOS])
+        self.assertTrue(extract.startswith("A través"))
+        self.assertTrue(extract[0].isupper())
+        self.assertTrue(extract.endswith("."))
+        self.assertIn("senador Andrés Pérez", extract)
 
 
 class PeopleOnlyLabelTests(unittest.TestCase):

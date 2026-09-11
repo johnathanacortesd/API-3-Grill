@@ -386,6 +386,150 @@ def split_sentences(text: str) -> List[str]:
     return [p.strip() for p in parts if p.strip()]
 
 
+# Nexos / relativos: si el extracto arranca aquí, ampliar a la izquierda.
+_SUBORDINATOR_WORDS = {
+    "que", "quien", "quienes", "donde", "dónde", "adonde", "adónde",
+    "cuando", "cuándo", "como", "cómo", "cual", "cuál", "cuales", "cuáles",
+    "cuyo", "cuya", "cuyos", "cuyas", "aunque", "porque", "pues", "si",
+    "mientras", "segun", "según", "conforme", "cuanto", "cuánta", "cuánto",
+    "pero", "sino", "y", "e", "o", "u", "ni",
+}
+
+_SENTENCE_BOUNDARY_RE = re.compile(r"[.!?]+[»”’\"']*\s+|\n+")
+_TERMINAL_IN_REST_RE = re.compile(r"[.!?]+[»”’\"']*(?=\s|$)")
+
+
+def _first_word(text: str) -> str:
+    m = re.match(r"^[^\wÁÉÍÓÚÜÑáéíóúüñ]*(\w+)", text or "", flags=re.UNICODE)
+    return m.group(1) if m else ""
+
+
+def _starts_with_subordinator(span: str) -> bool:
+    return _norm(_first_word(span)) in _SUBORDINATOR_WORDS
+
+
+def _sentence_start(source: str, pos: int) -> int:
+    """Inicio de la oración que contiene `pos` (después de `.` `?` `!` o arranque)."""
+    if pos <= 0:
+        start = 0
+    else:
+        start = 0
+        for m in _SENTENCE_BOUNDARY_RE.finditer(source[:pos]):
+            start = m.end()
+    while start < len(source) and source[start].isspace():
+        start += 1
+    return start
+
+
+def _already_at_terminal(source: str, end: int) -> int:
+    """Si `end` ya cubre `.` `!` `?` (y comillas de cierre), devuelve ese fin; si no, -1."""
+    check = end
+    while check > 0 and source[check - 1].isspace():
+        check -= 1
+    quotes = 0
+    while check > 0 and source[check - 1] in "»”’\"'":
+        check -= 1
+        quotes += 1
+    if check > 0 and source[check - 1] in ".!?":
+        return check + quotes
+    return -1
+
+
+def _sentence_end(source: str, end: int) -> int:
+    """Extiende `end` hasta el `.` `!` `?` de cierre de la oración en el origen."""
+    n = len(source)
+    end = max(0, min(end, n))
+    already = _already_at_terminal(source, end)
+    if already >= 0:
+        return already
+    rest = source[end:]
+    m = _TERMINAL_IN_REST_RE.search(rest)
+    if m:
+        return end + m.end()
+    return n
+
+
+def _locate_in_source(span: str, source: str) -> Tuple[int, int]:
+    span = (span or "").strip()
+    if not span or not source:
+        return -1, -1
+    idx = source.find(span)
+    if idx >= 0:
+        return idx, idx + len(span)
+    rec = recover_verbatim(span, source)
+    if rec:
+        idx = source.find(rec)
+        if idx >= 0:
+            return idx, idx + len(rec)
+    idx = source.lower().find(span.lower())
+    if idx >= 0:
+        return idx, idx + len(span)
+    return -1, -1
+
+
+def _should_expand_left(span: str, source: str, start: int) -> bool:
+    if start <= 0:
+        return False
+    natural = _sentence_start(source, start)
+    if start <= natural:
+        return False
+    if _starts_with_subordinator(span):
+        return True
+    prev = source[:start].rstrip()
+    if prev and prev[-1] in ",;:":
+        return True
+    stripped = span.lstrip(" «»\"'`“”")
+    if stripped and stripped[0].islower():
+        return True
+    # Fragmento a mitad de oración: preferir el arranque natural.
+    return True
+
+
+def _capitalize_first_letter(text: str) -> str:
+    m = re.search(r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ]", text or "")
+    if not m:
+        return text
+    i = m.start()
+    ch = text[i]
+    if ch.islower():
+        return text[:i] + ch.upper() + text[i + 1 :]
+    return text
+
+
+def _ensure_terminal_punct(text: str) -> str:
+    s = (text or "").rstrip()
+    if not s:
+        return s
+    core = s.rstrip("»”’\"'")
+    if core.endswith((".", "!", "?")):
+        return s
+    return s + "."
+
+
+def format_extract(candidate: str, source: str) -> str:
+    """Extracto literal de `source`, oración completa, mayúscula inicial y punto final.
+
+    Si el tramo empieza por un nexo (`que`, `quien`, `donde`, …) o a mitad de
+    cláusula (aposiciones con `,` / `;`), se amplía a la izquierda hasta el
+    inicio de la oración. A la derecha se incluye el `.` `!` `?` del origen
+    cuando existe; si no hay puntuación terminal, se añade `.` solo de formato.
+    """
+    raw = (candidate or "").strip()
+    if is_filler(raw):
+        return ""
+    start, end = _locate_in_source(raw, source)
+    if start < 0:
+        return ""
+    span = source[start:end]
+    if _should_expand_left(span, source, start):
+        start = _sentence_start(source, start)
+    end = _sentence_end(source, end)
+    text = source[start:end].strip()
+    if not text:
+        return ""
+    return _ensure_terminal_punct(_capitalize_first_letter(text))
+
+
 def mentions_gobernacion(text: str) -> bool:
     return bool(text and _GOBERNACION_RE.search(text))
 
@@ -782,8 +926,8 @@ def enforce_people_only(result: Dict[str, str], titulo: str, cuerpo: str) -> Dic
 
     out[COL_PROPIOS] = _format_actors(propios_ok)
     out[COL_EXTERNOS] = _format_actors(externos_ok)
-    out[COL_INT_PROPIA] = own_extract if out[COL_PROPIOS] else ""
-    out[COL_MENCION_EXT] = ext_extract if out[COL_EXTERNOS] else ""
+    out[COL_INT_PROPIA] = format_extract(own_extract, body) if out[COL_PROPIOS] else ""
+    out[COL_MENCION_EXT] = format_extract(ext_extract, body) if out[COL_EXTERNOS] else ""
 
     for col in (COL_PROPIOS, COL_INT_PROPIA, COL_EXTERNOS, COL_MENCION_EXT):
         if is_filler(out.get(col, "")):
@@ -860,12 +1004,13 @@ Devuelve JSON con:
    - Un secretario o secretaria NOMBRADO/A de la Gobernación de Sucre (persona + cargo).
    Si Lucy NO interviene, NO pongas su nombre.
    PROHIBIDO como nombre/cargo (son entidades, no personas): «Secretaría de Educación departamental», «Gobernación de Sucre», «Ministerio del Interior», «Presidencia de la República» u otra entidad sola.
-3. "intervencion_propia": EXTRACTO LITERAL del CuerpoEs de lo que ESA PERSONA dijo o hizo. Sin intros, sin paráfrasis, sin notas editoriales.
+3. "intervencion_propia": EXTRACTO LITERAL del CuerpoEs de lo que ESA PERSONA dijo o hizo. Oración completa (si empieza por «que/quien/donde», incluye desde el inicio de la frase y aposiciones). Sin intros, sin paráfrasis, sin notas editoriales.
 4. "nombre_cargo_externos": SOLO personas con nombre + cargo que hablan/opinan y se refieren a la Gobernación de Sucre o a Lucy. Ejemplo: «Andrés Julián Rendón, Gobernador de Antioquia». Nunca una entidad sola.
-5. "mencion_externa": EXTRACTO LITERAL del CuerpoEs de la intervención de esa persona refiriéndose a la Gobernación/Lucy.
+5. "mencion_externa": EXTRACTO LITERAL del CuerpoEs de la intervención de esa persona refiriéndose a la Gobernación/Lucy. Misma regla de oración completa que intervencion_propia.
 
 REGLAS:
 - Extractos = copia literal del Cuerpo. Prohibido parafrasear.
+- Primera letra en mayúscula; el extracto termina en punto.
 - Si no hay dato, usa "" (nunca «(sin actor externo)», N/A, ninguno).
 - Varios actores se separan con "; " en formato «Nombre Apellido, Cargo».
 
