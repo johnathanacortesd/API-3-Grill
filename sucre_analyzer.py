@@ -792,6 +792,58 @@ def _external_speaks_about_brand(sentence: str, title: str, body: str) -> bool:
     return bool(_SPEECH_VERBS_RE.search(sentence) or _AGENCY_VERBS_RE.search(sentence))
 
 
+def extract_mentions_sucre_or_lucy(extract: str, title: str = "", body: str = "") -> bool:
+    """El extracto debe nombrar Gobernación de Sucre y/o Lucy (variantes)."""
+    if not extract:
+        return False
+    sucre = article_anchors_sucre(title, body) if (title or body) else False
+    if mentions_gobernacion(extract) or _LUCY_PERSON_RE.search(extract):
+        return True
+    if sucre and _LUCY_ROLE_LOOSE_RE.search(extract):
+        return True
+    return False
+
+
+def _name_in_text(name: str, text: str) -> bool:
+    if not name or not text:
+        return False
+    n = _norm(name)
+    t = _norm(text)
+    if n and n in t:
+        return True
+    parts = [p for p in n.split() if len(p) > 2]
+    if not parts:
+        return False
+    return parts[-1] in t
+
+
+def _external_body_spans_about_brand(name: str, title: str, body: str) -> List[str]:
+    hits: List[str] = []
+    name = collapse_ws(name or "")
+    if not name:
+        return hits
+    for sent in split_sentences(body):
+        if not _name_in_text(name, sent):
+            continue
+        if _external_speaks_about_brand(sent, title, body):
+            hits.append(sent)
+    return hits
+
+
+def _external_pair_is_valid(name: str, cargo: str, extract: str, title: str, body: str) -> bool:
+    if not looks_like_person_name(name) or not cargo:
+        return False
+    if is_entity_only_label(name) or _is_lucy_name_or_role(name, cargo):
+        return False
+    if not extract or not extract_mentions_sucre_or_lucy(extract, title, body):
+        return False
+    if not _name_in_text(name, extract):
+        return False
+    if not (_SPEECH_VERBS_RE.search(extract) or _AGENCY_VERBS_RE.search(extract)):
+        return False
+    return True
+
+
 def heuristic_tone(title: str, body: str) -> str:
     blob = f"{title} {body}"
     pos = bool(_POS_RE.search(blob))
@@ -922,12 +974,46 @@ def enforce_people_only(result: Dict[str, str], titulo: str, cuerpo: str) -> Dic
         externos_ok.append((name, cargo))
 
     own_extract = recover_verbatim(out.get(COL_INT_PROPIA, ""), body)
-    ext_extract = recover_verbatim(out.get(COL_MENCION_EXT, ""), body)
+    proposed_ext = format_extract(recover_verbatim(out.get(COL_MENCION_EXT, ""), body), body)
+
+    kept_ext: List[Tuple[str, str]] = []
+    span_pool: List[str] = []
+    for name, cargo in externos_ok:
+        if proposed_ext and _external_pair_is_valid(name, cargo, proposed_ext, title, body):
+            kept_ext.append((name, cargo))
+            continue
+        spans = _external_body_spans_about_brand(name, title, body)
+        if spans:
+            kept_ext.append((name, cargo))
+            span_pool.extend(spans)
+
+    ext_extract = ""
+    if kept_ext:
+        if proposed_ext and all(
+            _external_pair_is_valid(n, c, proposed_ext, title, body) for n, c in kept_ext
+        ):
+            ext_extract = proposed_ext
+        elif span_pool:
+            ext_extract = format_extract(
+                recover_verbatim(_span_from_sentences(body, span_pool), body),
+                body,
+            )
+        elif proposed_ext and extract_mentions_sucre_or_lucy(proposed_ext, title, body):
+            if any(_name_in_text(n, proposed_ext) for n, _ in kept_ext):
+                ext_extract = proposed_ext
+
+    if (
+        not kept_ext
+        or not ext_extract
+        or not extract_mentions_sucre_or_lucy(ext_extract, title, body)
+    ):
+        kept_ext = []
+        ext_extract = ""
 
     out[COL_PROPIOS] = _format_actors(propios_ok)
-    out[COL_EXTERNOS] = _format_actors(externos_ok)
+    out[COL_EXTERNOS] = _format_actors(kept_ext)
     out[COL_INT_PROPIA] = format_extract(own_extract, body) if out[COL_PROPIOS] else ""
-    out[COL_MENCION_EXT] = format_extract(ext_extract, body) if out[COL_EXTERNOS] else ""
+    out[COL_MENCION_EXT] = ext_extract if out[COL_EXTERNOS] else ""
 
     for col in (COL_PROPIOS, COL_INT_PROPIA, COL_EXTERNOS, COL_MENCION_EXT):
         if is_filler(out.get(col, "")):
@@ -1005,8 +1091,8 @@ Devuelve JSON con:
    Si Lucy NO interviene, NO pongas su nombre.
    PROHIBIDO como nombre/cargo (son entidades, no personas): «Secretaría de Educación departamental», «Gobernación de Sucre», «Ministerio del Interior», «Presidencia de la República» u otra entidad sola.
 3. "intervencion_propia": EXTRACTO LITERAL del CuerpoEs de lo que ESA PERSONA dijo o hizo. Oración completa (si empieza por «que/quien/donde», incluye desde el inicio de la frase y aposiciones). Sin intros, sin paráfrasis, sin notas editoriales.
-4. "nombre_cargo_externos": SOLO personas con nombre + cargo que hablan/opinan y se refieren a la Gobernación de Sucre o a Lucy. Ejemplo: «Andrés Julián Rendón, Gobernador de Antioquia». Nunca una entidad sola.
-5. "mencion_externa": EXTRACTO LITERAL del CuerpoEs de la intervención de esa persona refiriéndose a la Gobernación/Lucy. Misma regla de oración completa que intervencion_propia.
+4. "nombre_cargo_externos": SOLO si esa PERSONA (nombre + cargo) habló u opinó ACERCA DE la Gobernación de Sucre o de Lucy (variantes: Lucy Inés García Montes, Lucy García Montes, Lucy Montes, Lucy García, gobernadora de Sucre, gobernadora Lucy). Si habló de otro tema —aunque aparezca en la misma nota— deja "". Nunca una entidad sola. Ejemplo válido: «Andrés Julián Rendón, Gobernador de Antioquia».
+5. "mencion_externa": EXTRACTO LITERAL del CuerpoEs de ESA intervención. Debe contener Gobernación de Sucre y/o Lucy (mismas variantes). Si el extracto no las nombra, deja "" y también nombre_cargo_externos "". Misma regla de oración completa que intervencion_propia.
 
 REGLAS:
 - Extractos = copia literal del Cuerpo. Prohibido parafrasear.

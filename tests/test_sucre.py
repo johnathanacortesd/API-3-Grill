@@ -251,6 +251,26 @@ class HeuristicExtractTests(unittest.TestCase):
         self.assertIn(out[COL_MENCION_EXT][:40], RENDON_BODY)
         self.assertEqual(out[COL_PROPIOS], "")
 
+    def test_external_without_sucre_or_lucy_mention_is_empty(self):
+        body = (
+            "La Gobernación de Sucre presentó el plan departamental de vías. "
+            "En Bogotá, el senador Andrés Pérez opinó que el Gobierno nacional "
+            "debe acelerar la reforma a la salud y no habló de Sincelejo."
+        )
+        out = heuristic_analyze("Plan vial y debate nacional", body)
+        self.assertEqual(out[COL_EXTERNOS], "")
+        self.assertEqual(out[COL_MENCION_EXT], "")
+
+    def test_external_with_sucre_mention_fills_person_and_extract(self):
+        out = heuristic_analyze("Senador cuestiona vías", SENATOR_BODY)
+        self.assertIn("Andrés Pérez", out[COL_EXTERNOS])
+        self.assertIn("senador", out[COL_EXTERNOS].lower())
+        extract = out[COL_MENCION_EXT]
+        self.assertTrue(extract)
+        self.assertIn(extract[:40], SENATOR_BODY)
+        self.assertIn("Gobernación de Sucre", extract)
+        self.assertIn("Andrés Pérez", extract)
+
     def test_entity_only_external_is_empty(self):
         body = (
             "El Ministerio del Interior cuestionó a la Gobernación de Sucre "
@@ -345,6 +365,44 @@ class LlmMergeTests(unittest.TestCase):
         out = analyze_article("Becas", LUCY_BODY, client=None)
         self.assertEqual(out[COL_TONO], "Positivo")
         self.assertTrue(out[COL_INT_PROPIA])
+
+    def test_llm_external_without_sucre_lucy_in_extract_is_dropped(self):
+        body = (
+            "La gobernadora Lucy García anunció becas en Sincelejo. "
+            "El senador Andrés Pérez dijo que el Congreso debe votar la reforma pensional."
+        )
+        heuristic = heuristic_analyze("Becas y reforma", body)
+        llm = {
+            "tono": "Positivo",
+            "nombre_cargo_propios": "Lucy Inés García Montes, Gobernadora de Sucre",
+            "intervencion_propia": "La gobernadora Lucy García anunció becas en Sincelejo.",
+            "nombre_cargo_externos": "Andrés Pérez, senador",
+            "mencion_externa": (
+                "El senador Andrés Pérez dijo que el Congreso debe votar la reforma pensional."
+            ),
+        }
+        merged = merge_analysis(llm, heuristic, "Becas y reforma", body)
+        self.assertEqual(merged[COL_EXTERNOS], "")
+        self.assertEqual(merged[COL_MENCION_EXT], "")
+
+    def test_llm_bad_extract_recovers_span_that_mentions_gobernacion(self):
+        body = (
+            "El senador Andrés Pérez saludó a los periodistas en el recinto. "
+            "Más tarde el senador Andrés Pérez señaló que la Gobernación de Sucre "
+            "no ha ejecutado el presupuesto de vías rurales."
+        )
+        heuristic = heuristic_analyze("Senador", body)
+        llm = {
+            "tono": "Negativo",
+            "nombre_cargo_propios": "",
+            "intervencion_propia": "",
+            "nombre_cargo_externos": "Andrés Pérez, senador",
+            "mencion_externa": "El senador Andrés Pérez saludó a los periodistas en el recinto.",
+        }
+        merged = merge_analysis(llm, heuristic, "Senador", body)
+        self.assertIn("Andrés Pérez", merged[COL_EXTERNOS])
+        self.assertIn("Gobernación de Sucre", merged[COL_MENCION_EXT])
+        self.assertNotIn("periodistas", merged[COL_MENCION_EXT])
 
     def test_enforce_drops_presidencia_alone(self):
         raw = {

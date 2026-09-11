@@ -21,8 +21,14 @@ FORBIDDEN_TRAILING_WORDS = {
     "hacia", "desde", "sin", "que", "se"
 }
 
-MAX_SUBTEMA_WORDS = 7
+MAX_SUBTEMA_WORDS = 6
 MIN_SUBTEMA_WORDS = 4
+
+# Conectores de frase nominal (no contar como collage).
+NP_STRUCTURAL = {
+    "de", "del", "en", "para", "por", "con", "a", "al", "y", "e", "o", "u",
+    "sobre", "entre", "hacia", "desde", "sin",
+}
 
 DISCOURSE_STARTERS = {
     "de", "del", "ese", "esa", "esos", "esas", "este", "esta", "estos", "estas",
@@ -445,6 +451,70 @@ def _has_echoed_content_pair(words: List[str]) -> bool:
     return any(lows[i] == lows[i + 1] for i in range(len(lows) - 1))
 
 
+def _phrase_lows(text: str) -> List[str]:
+    return [unidecode(w.lower()) for w in _tokenize_phrase_words(text)]
+
+
+def _source_has_ngram(phrase_lows: List[str], source: str, n: int = 3) -> bool:
+    src = _phrase_lows(source)
+    if not phrase_lows or not src:
+        return False
+    n = min(n, len(phrase_lows), len(src))
+    if n < 2:
+        return False
+    spans = {" ".join(src[i:i + n]) for i in range(0, len(src) - n + 1)}
+    for i in range(0, len(phrase_lows) - n + 1):
+        if " ".join(phrase_lows[i:i + n]) in spans:
+            return True
+    return False
+
+
+def is_keyword_collage(text: str, source: str = "") -> bool:
+    """True si el subtema es bolsa de palabras / lista, no una frase nominal."""
+    raw = str(text or "").strip()
+    if not raw:
+        return False
+    chunks = [c.strip() for c in re.split(r"[,;/|•]+", raw) if c.strip()]
+    if len(chunks) >= 3:
+        return True
+    words = _tokenize_phrase_words(raw)
+    if len(words) < 3:
+        return False
+    lows = [unidecode(w.lower()) for w in words]
+    if any(w in NP_STRUCTURAL for w in lows):
+        return False
+    if source and _source_has_ngram(lows, source, 3):
+        return False
+    if source and len(words) <= 4 and _source_has_ngram(lows, source, 2):
+        return False
+    return True
+
+
+def _trim_phrase_words(words: List[str]) -> List[str]:
+    fitted = [w for w in words if w]
+    while fitted and fitted[-1].lower() in FORBIDDEN_TRAILING_WORDS:
+        fitted.pop()
+    droppable = {"el", "la", "los", "las", "un", "una"}
+    while len(fitted) > MAX_SUBTEMA_WORDS:
+        dropped = False
+        for i, w in enumerate(fitted):
+            if i == 0:
+                continue
+            if unidecode(w.lower()) in droppable:
+                fitted.pop(i)
+                dropped = True
+                break
+        if not dropped:
+            break
+    while len(fitted) > MAX_SUBTEMA_WORDS and unidecode(fitted[0].lower()) in STOPWORDS_ES:
+        fitted = fitted[1:]
+    if len(fitted) > MAX_SUBTEMA_WORDS:
+        fitted = fitted[:MAX_SUBTEMA_WORDS]
+        while fitted and fitted[-1].lower() in FORBIDDEN_TRAILING_WORDS:
+            fitted.pop()
+    return fitted
+
+
 def _tokenize_phrase_words(text: str) -> List[str]:
     return re.findall(r"[A-Za-zÁÉÍÓÚáéíóúÑñÜü0-9]+", str(text or ""))
 
@@ -491,55 +561,69 @@ def _complete_proper_names_from_context(phrase: str, ctx: str) -> str:
                 break
             extra.append(tok)
             j += 1
-            if len(pwords) + len(extra) >= MAX_SUBTEMA_WORDS:
+            if len(extra) >= 3:
                 break
         if extra:
-            fitted = pwords + extra
-            while len(fitted) > MAX_SUBTEMA_WORDS and unidecode(fitted[0].lower()) in STOPWORDS_ES:
-                fitted = fitted[1:]
-            fitted = fitted[:MAX_SUBTEMA_WORDS]
-            while fitted and fitted[-1].lower() in FORBIDDEN_TRAILING_WORDS:
-                fitted.pop()
-            return " ".join(fitted)
+            fitted = _trim_phrase_words(pwords + extra)
+            return " ".join(fitted) if fitted else phrase
         break
     return phrase
 
 
+def _clause_token_lists(text: str) -> List[List[str]]:
+    """No cruzar comas/puntos: eso convertía enumeraciones en collage."""
+    clauses = re.split(r"[,.;:!?¿¡…|/]+", str(text or ""))
+    out: List[List[str]] = []
+    for clause in clauses:
+        toks = _tokenize_phrase_words(clause)
+        if len(toks) >= MIN_SUBTEMA_WORDS:
+            out.append(toks)
+    return out
+
+
 def _window_from_context(ctx: str, tema: str, title: str, brand: str) -> str:
     """Noun-phrase window from this story's contexto; never a lead-clause scrap."""
-    words = _tokenize_phrase_words(ctx)
-    if len(words) < MIN_SUBTEMA_WORDS:
+    clauses = _clause_token_lists(ctx)
+    if not clauses:
         return ""
     brand_toks = _brand_token_set(brand)
     best = ""
     best_score = -10**9
-    for n in range(MAX_SUBTEMA_WORDS, MIN_SUBTEMA_WORDS - 1, -1):
-        for i in range(0, len(words) - n + 1):
-            window = list(words[i:i + n])
-            if _is_lead_clause_scrap(window):
-                continue
-            while window and window[-1].lower() in FORBIDDEN_TRAILING_WORDS:
-                window.pop()
-            if len(window) < MIN_SUBTEMA_WORDS:
-                continue
-            phrase = " ".join(window)
-            if _labels_too_close(tema, phrase) or _is_title_scrap(phrase, title):
-                continue
-            lows = [unidecode(w.lower()) for w in window]
-            content = [w for w in lows if w not in STOPWORDS_ES and len(w) > 2]
-            if len(content) < 2:
-                continue
-            if set(content).issubset(brand_toks):
-                continue
-            score = 10 * len(content)
-            score += 16 * sum(1 for w in content if w in FACT_HINTS or any(w.startswith(h) for h in FACT_HINTS))
-            if lows[0] in STOPWORDS_ES:
-                score -= 8
-            if _has_echoed_content_pair(window):
-                score -= 40
-            if score > best_score:
-                best_score = score
-                best = phrase
+    for words in clauses:
+        for n in range(MAX_SUBTEMA_WORDS, MIN_SUBTEMA_WORDS - 1, -1):
+            for i in range(0, len(words) - n + 1):
+                window = list(words[i:i + n])
+                if _is_lead_clause_scrap(window):
+                    continue
+                window = _trim_phrase_words(window)
+                if len(window) < MIN_SUBTEMA_WORDS:
+                    continue
+                phrase = " ".join(window)
+                if _labels_too_close(tema, phrase) or _is_title_scrap(phrase, title):
+                    continue
+                if is_keyword_collage(phrase, f"{title} {ctx}"):
+                    continue
+                lows = [unidecode(w.lower()) for w in window]
+                content = [w for w in lows if w not in STOPWORDS_ES and len(w) > 2]
+                if len(content) < 2:
+                    continue
+                if set(content).issubset(brand_toks):
+                    continue
+                score = 10 * len(content)
+                score += 16 * sum(
+                    1 for w in content if w in FACT_HINTS or any(w.startswith(h) for h in FACT_HINTS)
+                )
+                if any(w in NP_STRUCTURAL for w in lows):
+                    score += 14
+                else:
+                    score -= 16
+                if lows[0] in STOPWORDS_ES:
+                    score -= 8
+                if _has_echoed_content_pair(window):
+                    score -= 40
+                if score > best_score:
+                    best_score = score
+                    best = phrase
     if best_score < 8 or not best:
         return ""
     return best.capitalize()
@@ -590,12 +674,12 @@ def _fact_families_present(tokens: Set[str]) -> Set[int]:
 def clean_subtema(text: str, brand: str, title_fallback: str) -> str:
     if not text:
         return _fallback_from_title(title_fallback)
-        
+
+    if is_keyword_collage(text, title_fallback):
+        return ""
+
     clean = re.sub(r'[,.;:!?¿¡"\'\(\)\[\]\{\}\-_/\\|]', ' ', str(text))
-    words = [w for w in clean.split() if w]
-    
-    if len(words) > MAX_SUBTEMA_WORDS:
-        words = words[:MAX_SUBTEMA_WORDS]
+    words = _trim_phrase_words([w for w in clean.split() if w])
         
     while words and words[-1].lower() in FORBIDDEN_TRAILING_WORDS:
         words.pop()
@@ -620,6 +704,7 @@ def clean_subtema(text: str, brand: str, title_fallback: str) -> str:
         or res_words.issubset(brand_words)
         or _is_lead_clause_scrap(res.split())
         or _has_echoed_content_pair(res.split())
+        or is_keyword_collage(res, title_fallback)
         or res_lower in ["universidad", "autonoma", "fundacion", "clinica", "hospital", "institucion", "asociacion"]
     ):
         if res_words.issubset(brand_words) or res_lower in [
@@ -634,10 +719,14 @@ def clean_subtema(text: str, brand: str, title_fallback: str) -> str:
 def clean_tema(text: str) -> str:
     if not text:
         return "Gestión Institucional"
+    if is_keyword_collage(text):
+        return "Gestión Institucional"
     clean = re.sub(r'[,.;:!?¿¡"\'\(\)\[\]\{\}\-_/\\|]', ' ', str(text)).strip()
     words = clean.split()[:4]
     res = " ".join(words).title()
     if res.lower() in ["otros", "otro", "general", "varios", "miscelanea", "sin clasificar", ""]:
+        return "Gestión Institucional"
+    if is_keyword_collage(res):
         return "Gestión Institucional"
     return res
 
@@ -695,9 +784,7 @@ def _fallback_from_title(title: str) -> str:
         return "Hecho Informativo"
     t = re.sub(r"^(?:imagenes|video|en fotos)\s*\|\s*", "", title, flags=re.IGNORECASE).strip()
     words = re.sub(r'[,.;:!?¿¡"\'\(\)\[\]\{\}\-_/\\|]', ' ', t).split()
-    clean_words = words[:MAX_SUBTEMA_WORDS]
-    while clean_words and clean_words[-1].lower() in FORBIDDEN_TRAILING_WORDS:
-        clean_words.pop()
+    clean_words = _trim_phrase_words(words)
     return " ".join(clean_words).capitalize() if clean_words else "Hecho Informativo"
 
 def cluster_similar_rows(
@@ -879,7 +966,7 @@ def ensure_subtema_distinct_from_tema(
     ctx: str,
     aliases: Optional[List[str]] = None,
 ) -> str:
-    """Keep a 4–7 word fact noun phrase from this story. Never a lead-clause scrap."""
+    """Keep a 4–6 word fact noun phrase from this story. Never a keyword collage."""
     llm_clean = clean_subtema(subtema or "", brand, title)
 
     def _strong(phrase: str) -> bool:
@@ -889,6 +976,8 @@ def ensure_subtema_distinct_from_tema(
         if len(words) < MIN_SUBTEMA_WORDS or len(words) > MAX_SUBTEMA_WORDS:
             return False
         if _is_lead_clause_scrap(words) or _has_echoed_content_pair(words):
+            return False
+        if is_keyword_collage(phrase, f"{title} {ctx}"):
             return False
         if _labels_too_close(tema, phrase) or _is_title_scrap(phrase, title):
             return False
@@ -959,18 +1048,24 @@ def _call_openai_cluster(
         n += 1
     if request_theme:
         steps.append(
-            f'{n}. "tema": DOMINIO GENERAL (Nivel Macro, 1 a 3 palabras. Ej: "Educación Superior", "Gestión Tributaria", "Sector Salud"). PROHIBIDO "Otros".'
+            f'{n}. "tema": DOMINIO GENERAL de ESTA nota (1 a 3 palabras, tema razonable. '
+            'Ej: "Educación Superior", "Gestión Tributaria", "Sector Salud"). '
+            'PROHIBIDO "Otros", recortes y collage de keywords.'
         )
         json_fields.append('"tema": "..."')
         n += 1
 
     subtema_rule = (
-        f'{n}. "subtema": HECHO ESPECÍFICO de ESTA noticia (frase nominal coherente '
-        "en español colombiano, 4 a 7 palabras, completa, sin cortar nombres propios). "
+        f'{n}. "subtema": HECHO ESPECÍFICO de ESTA noticia: frase nominal coherente '
+        "en español colombiano, máximo 6 palabras, orden lógico y sentido completo "
+        "(artículos y conectores sí, si hacen falta). "
         "Tómalo del título + contexto analizado de esta fila. "
-        "PROHIBIDO collage de keywords, recortar el titular, copiar el tema, "
-        "usar la marca del cliente como subtema, o inventar un subtema compartido "
-        "para forzar agrupación con otras notas."
+        "PROHIBIDO collage de keywords, bolsa de palabras, recortar el titular, "
+        "copiar el tema, usar la marca del cliente como subtema, o inventar un "
+        "subtema compartido para forzar agrupación. "
+        'Correcto: "Entrega de becas universitarias"; "Cátedra FICCI cine y memoria". '
+        'Prohibido: "Becas feria cartagena oferta universidad"; '
+        '"Libre seccional cartagena fundación universitaria".'
     )
     steps.append(subtema_rule)
     json_fields.append('"subtema": "..."')

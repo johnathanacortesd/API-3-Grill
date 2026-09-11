@@ -21,6 +21,7 @@ from ai_analyzer import (
     enrich_rows_with_ai,
     ensure_subtema_distinct_from_tema,
     generate_brand_variants,
+    is_keyword_collage,
     subtema_supported_by_context,
     _has_echoed_content_pair,
 )
@@ -62,7 +63,7 @@ class EchoSubtemaTests(unittest.TestCase):
         self.assertNotEqual(low, "beneficios y beneficios académicos")
         self.assertFalse(_has_echoed_content_pair(sub.split()))
         self.assertGreaterEqual(len(sub.split()), 4)
-        self.assertLessEqual(len(sub.split()), 7)
+        self.assertLessEqual(len(sub.split()), 6)
         self.assertTrue(
             "beca" in low or "feria" in low or "inscrip" in low or "inspirate" in low,
             f"subtema should name the news fact, got {sub!r}",
@@ -83,7 +84,7 @@ class EchoSubtemaTests(unittest.TestCase):
         low = sub.strip().lower()
         self.assertNotEqual(low, "participación de la universidad tecnológica de bolívar")
         self.assertGreaterEqual(len(sub.split()), 4)
-        self.assertLessEqual(len(sub.split()), 7)
+        self.assertLessEqual(len(sub.split()), 6)
         self.assertTrue(
             "congreso" in low or "patrimonio" in low or "cartagena" in low,
             f"subtema should prefer the event, got {sub!r}",
@@ -232,7 +233,7 @@ class NearSimilarClusteringTests(unittest.TestCase):
         self.assertIn("women", out[0]["Subtema_IA"].lower())
         self.assertIn("tech", out[0]["Subtema_IA"].lower())
         self.assertGreaterEqual(len(out[0]["Subtema_IA"].split()), 4)
-        self.assertLessEqual(len(out[0]["Subtema_IA"].split()), 7)
+        self.assertLessEqual(len(out[0]["Subtema_IA"].split()), 6)
 
 
 class BrandCentricTonoTests(unittest.TestCase):
@@ -273,7 +274,7 @@ class ContextGroundingTests(unittest.TestCase):
         self.assertNotIn("beca", low)
         self.assertNotIn("inscrip", low)
         self.assertGreaterEqual(len(sub.split()), 4)
-        self.assertLessEqual(len(sub.split()), 7)
+        self.assertLessEqual(len(sub.split()), 6)
         self.assertTrue(
             "ficci" in low or "cátedra" in low or "catedra" in low or "cine" in low,
             f"FICCI cine contexto must keep a cine/cátedra subtema, got {sub!r}",
@@ -385,7 +386,7 @@ class InspirateSameStoryTests(unittest.TestCase):
 
         low = unidecode(subs[0].strip().lower())
         self.assertGreaterEqual(len(subs[0].split()), 4)
-        self.assertLessEqual(len(subs[0].split()), 7)
+        self.assertLessEqual(len(subs[0].split()), 6)
         self.assertTrue(
             any(k in low for k in ("feria", "inspirate", "beca", "oferta")),
             f"subtema must name the feria/becas/oferta, got {subs[0]!r}",
@@ -408,6 +409,69 @@ class InspirateSameStoryTests(unittest.TestCase):
             f"fallback must ground in the feria, got {scrap!r}",
         )
         self.assertNotRegex(scrap_low, r"\b(uniminuto|minuto|bellas|matricula|libre)\b")
+
+
+class SubtemaCoherentPhraseTests(unittest.TestCase):
+    def test_rejects_keyword_collage_patterns(self):
+        self.assertTrue(is_keyword_collage("Becas, feria, cartagena, universidad"))
+        self.assertTrue(is_keyword_collage("Becas feria cartagena oferta universidad"))
+        self.assertTrue(
+            is_keyword_collage("Libre seccional cartagena fundación universitaria minuto")
+        )
+        self.assertFalse(is_keyword_collage("Entrega de becas universitarias"))
+        self.assertFalse(is_keyword_collage("Cátedra FICCI cine y memoria"))
+        self.assertFalse(is_keyword_collage("Feria educativa Inspírate con becas"))
+        self.assertFalse(
+            is_keyword_collage(
+                "Premios women in tech latam",
+                "Women in Tech Latam Awards 2026",
+            )
+        )
+
+    def test_ensure_replaces_collage_with_coherent_six_word_phrase(self):
+        examples = [
+            (
+                "Educación Superior",
+                "Becas, feria, cartagena, oferta, universidad",
+                "Feria Educativa Inspírate abre becas UTB",
+                "La Universidad Tecnológica de Bolívar abre becas e inscripciones "
+                "en la Feria Educativa Inspírate.",
+            ),
+            (
+                "Cultura",
+                "Cine memoria festival cartagena patrimonio cátedra",
+                "Cátedra FICCI-UTB de cine y memoria",
+                FICCI_CINE_CTX,
+            ),
+        ]
+        for tema, collage, title, ctx in examples:
+            sub = ensure_subtema_distinct_from_tema(
+                tema, collage, BRAND, title, ctx, ALIASES
+            )
+            self.assertGreaterEqual(len(sub.split()), 4, sub)
+            self.assertLessEqual(len(sub.split()), 6, sub)
+            self.assertFalse(
+                is_keyword_collage(sub, f"{title} {ctx}"),
+                f"still a collage: {sub!r}",
+            )
+            self.assertNotIn(",", sub)
+            low = unidecode(sub.lower())
+            self.assertTrue(
+                any(k in low for k in ("feria", "inspirate", "beca", "cine", "catedra", "ficci", "memoria")),
+                f"subtema must name the story, got {sub!r}",
+            )
+
+    def test_coherent_phrase_examples_keep_sense_and_order(self):
+        sub = ensure_subtema_distinct_from_tema(
+            "Educación Superior",
+            "Entrega de becas universitarias",
+            BRAND,
+            "Gobernadora entregó becas universitarias",
+            "La institución anunció la entrega de becas universitarias en Sincelejo.",
+            ALIASES,
+        )
+        self.assertEqual(unidecode(sub.lower()), "entrega de becas universitarias")
+        self.assertLessEqual(len(sub.split()), 6)
 
 
 if __name__ == "__main__":
