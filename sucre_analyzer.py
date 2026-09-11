@@ -1,5 +1,6 @@
 # ======================================
-# Análisis Sucre (Lucy / Gobernación) — aislado del Grill
+# Análisis Sucre — actores (personas) + extractos literales
+# Se suma al pipeline Grill; no reemplaza tono/tema/subtema.
 # ======================================
 import json
 import logging
@@ -17,37 +18,40 @@ logger = logging.getLogger("sucre_analyzer")
 BRAND = "Gobernación de Sucre"
 LUCY_CANONICAL_NAME = "Lucy Inés García Montes"
 LUCY_CANONICAL_CARGO = "Gobernadora de Sucre"
+LUCY_CANONICAL = f"{LUCY_CANONICAL_NAME}, {LUCY_CANONICAL_CARGO}"
 
 DEFAULT_ALIASES = [
     "Lucy Inés García Montes",
     "Lucy Inés García",
     "Lucy García Montes",
+    "Lucy Montes",
     "Lucy García",
     "Lucy Ines Garcia Montes",
     "gobernadora Lucy",
     "gobernadora de Sucre",
+    "Gobernadora de Sucre",
     "Gobernación de Sucre",
     "Gobernación Departamental de Sucre",
     "gobierno departamental de Sucre",
     "administración departamental de Sucre",
-    "Secretaría de Educación departamental",
-    "Secretaría de Educación de Sucre",
     "despacho de la gobernadora",
 ]
 
-COL_TONO = "Tono"
 COL_PROPIOS = "Nombre y cargo — actores propios"
 COL_INT_PROPIA = "Intervención actores propios (extracto)"
 COL_EXTERNOS = "Nombre y cargo — actores externos"
 COL_MENCION_EXT = "Mención / intervención externa (extracto)"
 
-SUCRE_OUTPUT_COLUMNS = [
-    COL_TONO,
+# Alias histórico: el Grill ya exporta Tono_IA; no se añade otra columna Tono.
+COL_TONO = "Tono"
+
+SUCRE_ACTOR_COLUMNS = [
     COL_PROPIOS,
     COL_INT_PROPIA,
     COL_EXTERNOS,
     COL_MENCION_EXT,
 ]
+SUCRE_OUTPUT_COLUMNS = list(SUCRE_ACTOR_COLUMNS)
 
 DEFAULT_MODEL = "gpt-4.1-nano-2025-04-14"
 
@@ -63,13 +67,22 @@ _FILLER_RE = re.compile(
     re.IGNORECASE,
 )
 
-_LUCY_RE = re.compile(
-    r"\b(?:lucy\s+in[eé]s\s+garc[ií]a(?:\s+montes)?|"
+# Persona Lucy / gobernadora (no la entidad Gobernación).
+_LUCY_PERSON_RE = re.compile(
+    r"\b(?:"
+    r"lucy\s+in[eé]s\s+garc[ií]a(?:\s+montes)?|"
     r"lucy\s+garc[ií]a(?:\s+montes)?|"
+    r"lucy\s+montes|"
+    r"lucy\s+in[eé]s|"
     r"gobernador[a]\s+lucy(?:\s+in[eé]s)?(?:\s+garc[ií]a)?(?:\s+montes)?|"
-    r"gobernador[a]\s+de\s+sucre|"
-    r"la\s+mandataria(?:\s+departamental)?|"
-    r"la\s+gobernador[a])\b",
+    r"gobernador[a]\s+de\s+sucre"
+    r")\b",
+    re.IGNORECASE,
+)
+
+# «la gobernadora» / «la mandataria» solo si el artículo ancla a Sucre.
+_LUCY_ROLE_LOOSE_RE = re.compile(
+    r"\b(?:la\s+gobernador[a]|la\s+mandataria(?:\s+departamental)?)\b",
     re.IGNORECASE,
 )
 
@@ -77,36 +90,52 @@ _GOBERNACION_RE = re.compile(
     r"\b(?:gobernaci[oó]n\s+(?:departamental\s+)?de\s+sucre|"
     r"gobierno\s+departamental(?:\s+de\s+sucre)?|"
     r"administraci[oó]n\s+departamental(?:\s+de\s+sucre)?|"
-    r"despacho\s+de\s+la\s+gobernador[a]|"
-    r"ejecutivo\s+departamental)\b",
+    r"despacho\s+de\s+la\s+gobernador[a])\b",
     re.IGNORECASE,
 )
 
-_SECRETARIA_STOP = (
-    r"(?!emit|expid|anunc|firm|dij|afirm|se[nñ]al|resolv|present|lanz|"
-    r"inform|destin|aprob|sancion|adopt|orden|dijo|puso|entreg|"
-    r"inaugur|habilit|comunic|report|suscrib|adjudic|asign)"
-)
-
-_SECRETARIA_RE = re.compile(
-    r"\bsecretar[ií]a\s+de\s+" + _SECRETARIA_STOP + r"[a-záéíóúñü]+"
-    r"(?:\s+(?:y\s+)?" + _SECRETARIA_STOP + r"[a-záéíóúñü]+){0,3}"
+# Entidad «Secretaría de …» (no persona).
+_SECRETARIA_ENTITY_RE = re.compile(
+    r"\bsecretar[ií]a\s+de\s+[a-záéíóúñü]+"
+    r"(?:\s+(?:y\s+)?[a-záéíóúñü]+){0,4}"
     r"(?:\s+departamental|\s+de\s+sucre)?",
     re.IGNORECASE,
 )
 
-_SECRETARIO_PERSONA_RE = re.compile(
-    r"\bsecretari[oa]\s+de\s+" + _SECRETARIA_STOP + r"[a-záéíóúñü]+"
-    r"(?:\s+(?:y\s+)?" + _SECRETARIA_STOP + r"[a-záéíóúñü]+){0,3}"
-    r"(?:\s+departamental|\s+de\s+sucre)?",
+_ENTITY_ONLY_HEADS = (
+    r"secretar[ií]a(?:\s+de)?",
+    r"gobernaci[oó]n(?:\s+de)?",
+    r"ministerio(?:\s+de(?:l)?)?",
+    r"presidencia(?:\s+de(?:\s+la)?)?",
+    r"alcald[ií]a(?:\s+de)?",
+    r"contralor[ií]a",
+    r"procuradur[ií]a",
+    r"fiscal[ií]a",
+    r"congreso",
+    r"gobierno(?:\s+(?:nacional|departamental|de))?",
+    r"departamento(?:\s+de)?",
+    r"instituto(?:\s+de)?",
+    r"direcci[oó]n(?:\s+de)?",
+)
+
+_ENTITY_ONLY_RE = re.compile(
+    r"^\s*(?:la\s+|el\s+|las\s+|los\s+)?"
+    r"(?:" + "|".join(_ENTITY_ONLY_HEADS) + r")"
+    r"\b",
     re.IGNORECASE,
 )
 
-_VOCERO_RE = re.compile(
-    r"\bvocer[oa]s?\s+(?:de\s+(?:la\s+)?gobernaci[oó]n(?:\s+de\s+sucre)?|"
-    r"departamental(?:es)?)\b",
-    re.IGNORECASE,
-)
+_FORBIDDEN_ENTITY_EXACT = {
+    "secretaria de educacion departamental",
+    "secretaria de educacion de sucre",
+    "gobernacion de sucre",
+    "gobernacion departamental de sucre",
+    "ministerio del interior",
+    "presidencia de la republica",
+    "gobierno nacional",
+    "casa de nariño",
+    "casa de narino",
+}
 
 _AGENCY_VERBS_RE = re.compile(
     r"\b(?:anunci[oó]|dijo|afirm[oó]|se[nñ]al[oó]|indic[oó]|asegur[oó]|"
@@ -117,8 +146,8 @@ _AGENCY_VERBS_RE = re.compile(
     r"destin[oó]|invirti[oó]|gestion[oó]|lider[oó]|orden[oó]|dispuso|"
     r"reglament[oó]|adopt[oó]|aprob[oó]|puso\s+en\s+marcha|"
     r"dieron\s+a\s+conocer|dio\s+a\s+conocer|comunic[oó]|report[oó]|"
-    r"habilit[oó]|destinaron|suscribi[oó]|adjudic[oó]|asign[oó]|"
-    r"expide|emite|anuncia|entrega|inaugura)\b",
+    r"habilit[oó]|suscribi[oó]|adjudic[oó]|asign[oó]|"
+    r"expide|emite|anuncia|entrega|inaugura|lidera)\b",
     re.IGNORECASE,
 )
 
@@ -127,7 +156,64 @@ _SPEECH_VERBS_RE = re.compile(
     r"destac[oó]|denunci[oó]|cuestion[oó]|critic[oó]|felicit[oó]|"
     r"rechaz[oó]|pidi[oó]|solicit[oó]|advirti[oó]|sostuvo|manifest[oó]|"
     r"declar[oó]|reproch[oó]|exigi[oó]|agradec[ioó]|respald[oó]|"
-    r"cuestionaron|criticaron|denunciaron|pidieron|señalaron)\b",
+    r"opin[oó]|consider[oó]|calific[oó]|cuestionaron|criticaron|"
+    r"denunciaron|pidieron|se[nñ]alaron)\b",
+    re.IGNORECASE,
+)
+
+_OBJECT_PREP_RE = re.compile(
+    r"\b(?:a|ante|contra|sobre|hacia|de|del)\s+(?:la\s+)?(?:gobernador[a]|mandataria|lucy)\b",
+    re.IGNORECASE,
+)
+
+_ROLE_HINT_RE = re.compile(
+    r"\b(?:senador(?:a)?|representante(?:\s+a\s+la\s+c[aá]mara)?|"
+    r"alcalde(?:sa)?|concejal(?:a)?|ministro|ministra|"
+    r"gobernador(?:a)?|presidente|presidenta|"
+    r"contralor(?:a)?|procurador(?:a)?|fiscal|diputad[oa]|"
+    r"director(?:a)?|rector(?:a)?|vocer[oa]|defensor(?:a)?|"
+    r"l[ií]der|dirigente|congresista|magistrad[oa])\b",
+    re.IGNORECASE,
+)
+
+# «Nombre Apellido, Cargo» o «El cargo Nombre Apellido».
+_NAME_TOKEN = r"[A-ZÁÉÍÓÚÑ][a-záéíóúñü']+"
+_NAME_RE = re.compile(
+    rf"({_NAME_TOKEN}(?:\s+(?:de\s+l[oa]s?\s+|de\s+|del\s+)?{_NAME_TOKEN}){{1,4}})"
+)
+
+_SECRETARY_NAME_FIRST_RE = re.compile(
+    rf"(?P<name>{_NAME_TOKEN}(?:\s+(?:de\s+l[oa]s?\s+|de\s+|del\s+)?{_NAME_TOKEN}){{1,4}})"
+    r"\s*,\s*"
+    r"(?P<role>secretari[oa]\s+de\s+[^.,;]{3,70})",
+    re.IGNORECASE,
+)
+
+_SECRETARY_ROLE_FIRST_RE = re.compile(
+    r"(?:el|la)\s+"
+    r"(?P<role>secretari[oa]\s+de\s+[^.,;]{3,50}?)"
+    r"\s*,\s*"
+    rf"(?P<name>{_NAME_TOKEN}(?:\s+(?:de\s+l[oa]s?\s+|de\s+|del\s+)?{_NAME_TOKEN}){{1,4}})",
+    re.IGNORECASE,
+)
+
+_SECRETARY_ROLE_THEN_NAME_RE = re.compile(
+    r"(?:el|la)\s+"
+    r"(?P<role>secretari[oa]\s+de\s+[a-záéíóúñü]+(?:\s+y\s+[a-záéíóúñü]+){0,2}"
+    r"(?:\s+(?:de\s+sucre|departamental))?)"
+    rf"\s+(?P<name>{_NAME_TOKEN}(?:\s+{_NAME_TOKEN}){{1,3}})",
+    re.IGNORECASE,
+)
+
+_OTHER_DEPT_RE = re.compile(
+    r"\b(?:antioquia|bol[ií]var|c[oó]rdoba|atl[aá]ntico|magdalena|cesar|"
+    r"guajira|santander|cundinamarca|bogot[aá]|valle|nari[nñ]o|huila|"
+    r"tolima|meta|choco|choc[oó]|caldas|risaralda|quindio|quind[ií]o)\b",
+    re.IGNORECASE,
+)
+
+_SUCRE_ANCHOR_RE = re.compile(
+    r"\b(?:sucre|sincelejo|gobernaci[oó]n\s+de\s+sucre|lucy)\b",
     re.IGNORECASE,
 )
 
@@ -146,15 +232,6 @@ _POS_RE = re.compile(
     r"obra(?:s)?|hospital|cobertura|calidad\s+educativa|"
     r"alianza|acompa[nñ]a(?:mos|miento)?|respaldo|homenaje|"
     r"puesta\s+en\s+marcha|programa\s+social)\b",
-    re.IGNORECASE,
-)
-
-_ROLE_HINT_RE = re.compile(
-    r"\b(?:senador(?:a)?|representante|alcalde(?:sa)?|concejal(?:a)?|"
-    r"ministro|ministra|gobernador(?:a)?|presidente|presidenta|"
-    r"contralor(?:a)?|procurador(?:a)?|fiscal|diputad[oa]|"
-    r"director(?:a)?|rector(?:a)?|vocer[oa]|defensor(?:a)?|"
-    r"l[ií]der|dirigente|congresista)\b",
     re.IGNORECASE,
 )
 
@@ -207,14 +284,14 @@ def collapse_ws(text: str) -> str:
     return re.sub(r"\s+", " ", text or "").strip()
 
 
-def _is_filler_or_empty(text: str) -> bool:
-    return is_filler(text)
+def _norm(text: str) -> str:
+    return unidecode(collapse_ws(text or "")).lower()
 
 
 def recover_verbatim(candidate: str, *sources: str) -> str:
     """Devuelve el tramo literal del origen si `candidate` coincide; si no, ''."""
     raw = (candidate or "").strip()
-    if _is_filler_or_empty(raw):
+    if is_filler(raw):
         return ""
 
     for source in sources:
@@ -286,7 +363,6 @@ def _recover_ws_flexible(candidate: str, source: str) -> str:
             return ""
     end_idx = pos + len(cand) - 1
     if end_idx >= len(idx_map) or pos >= len(idx_map):
-        # longitud distinta por unidecode; buscar de nuevo en unidecode map
         return _recover_unidecode_span(cand, source)
     start = idx_map[pos]
     end = idx_map[end_idx] + 1
@@ -299,7 +375,6 @@ def _recover_unidecode_span(cand: str, source: str) -> str:
     pos = src_u.lower().find(cand_u.lower())
     if pos < 0:
         return ""
-    # Aprox. 1:1 para textos en español con tildes (unidecode acorta poco)
     end = min(len(source), pos + len(cand))
     return source[pos:end]
 
@@ -311,83 +386,187 @@ def split_sentences(text: str) -> List[str]:
     return [p.strip() for p in parts if p.strip()]
 
 
-def mentions_lucy(text: str) -> bool:
-    return bool(text and _LUCY_RE.search(text))
-
-
 def mentions_gobernacion(text: str) -> bool:
     return bool(text and _GOBERNACION_RE.search(text))
 
 
-def mentions_own_entity(text: str) -> bool:
+def article_anchors_sucre(title: str, body: str) -> bool:
+    return bool(_SUCRE_ANCHOR_RE.search(f"{title} {body}"))
+
+
+def mentions_lucy_person(text: str, *, sucre_context: bool = True) -> bool:
     if not text:
         return False
-    return bool(
-        mentions_lucy(text)
-        or mentions_gobernacion(text)
-        or _SECRETARIA_RE.search(text)
-        or _SECRETARIO_PERSONA_RE.search(text)
-        or _VOCERO_RE.search(text)
-    )
-
-
-def _has_own_agency(sentence: str) -> bool:
-    """La Gobernación / Lucy es sujeto de un decir o un hacer, no el objeto de un tercero."""
-    if not mentions_own_entity(sentence):
-        return False
-    low = unidecode(sentence.lower())
-    if re.search(r"\bsegun\s+la\s+gobernador", low) or re.search(r"\bsegun\s+la\s+gobernacion", low):
+    if _LUCY_PERSON_RE.search(text):
         return True
-    if re.search(r"\b(?:emitida|expedida|firmada|sancionada|anunciada)\s+por\b", low):
+    if sucre_context and _LUCY_ROLE_LOOSE_RE.search(text):
         return True
-    if "resolucion" in low and mentions_gobernacion(sentence) and _AGENCY_VERBS_RE.search(sentence):
-        verb = _AGENCY_VERBS_RE.search(sentence)
-        return mentions_own_entity(sentence[: verb.start()]) if verb else True
-
-    verb = _AGENCY_VERBS_RE.search(sentence)
-    if not verb:
-        return False
-    before = sentence[: verb.start()]
-    if mentions_own_entity(before):
-        return True
-    # Inversión: «…», afirmó la gobernadora / la mandataria
-    after = sentence[verb.end():].lstrip(" ,")
-    after_u = unidecode(after).lower()
-    return bool(re.match(
-        r"^(?:la\s+)?(?:gobernador[a]|mandataria|gobernacion)\b",
-        after_u,
-    ))
-
-
-def _external_speaker_in(sentence: str) -> bool:
-    """Hay un actor que no es Lucy/Gobernación hablando en la oración."""
-    if not _SPEECH_VERBS_RE.search(sentence) and not _ROLE_HINT_RE.search(sentence):
-        return False
-    if _has_own_agency(sentence) and not _ROLE_HINT_RE.search(sentence):
-        return False
-    # Rol institucional ajeno (alcalde, senador, contralor, etc.)
-    for m in _ROLE_HINT_RE.finditer(sentence):
-        role = m.group(0)
-        if re.match(r"gobernador", role, re.I):
-            continue
-        window = sentence[max(0, m.start() - 12): min(len(sentence), m.end() + 8)]
-        if mentions_lucy(window) or re.search(r"gobernador[a]\s+de\s+sucre", window, re.I):
-            continue
-        return True
-    # Nombre propio + verbo de habla, y mención a la marca
-    if mentions_own_entity(sentence) and _SPEECH_VERBS_RE.search(sentence):
-        before_verb = sentence[: _SPEECH_VERBS_RE.search(sentence).start()]
-        if mentions_own_entity(before_verb) and not _ROLE_HINT_RE.search(before_verb):
-            return False
-        if re.search(r"\b[A-ZÁÉÍÓÚÑ][a-záéíóúñü]+(?:\s+[A-ZÁÉÍÓÚÑ][a-záéíóúñü]+){1,3}\b", before_verb):
-            return True
     return False
 
 
+def mentions_brand_or_lucy(text: str, *, sucre_context: bool = True) -> bool:
+    return mentions_lucy_person(text, sucre_context=sucre_context) or mentions_gobernacion(text)
+
+
+def is_entity_only_label(text: str) -> bool:
+    raw = collapse_ws(text or "")
+    if not raw or is_filler(raw):
+        return True
+    n = _norm(raw)
+    n = re.sub(r"\s*,\s*", " ", n)
+    if n in _FORBIDDEN_ENTITY_EXACT:
+        return True
+    # «Nombre, cargo» se valida por la parte del nombre.
+    name_part = raw.split(",", 1)[0].strip()
+    name_n = _norm(name_part)
+    if name_n in _FORBIDDEN_ENTITY_EXACT:
+        return True
+    if _ENTITY_ONLY_RE.match(name_part):
+        return True
+    return False
+
+
+def looks_like_person_name(name: str) -> bool:
+    name = collapse_ws(name or "")
+    if not name or is_filler(name) or is_entity_only_label(name):
+        return False
+    if _ROLE_HINT_RE.fullmatch(name) or re.match(r"^secretari[oa]\b", name, re.I):
+        return False
+    tokens = name.split()
+    if len(tokens) < 2:
+        return False
+    caps = sum(1 for t in tokens if t[:1].isupper() or t[:1] in "ÁÉÍÓÚÑ")
+    return caps >= 2
+
+
+def _title_case_role(role: str) -> str:
+    role = collapse_ws(role or "")
+    if not role:
+        return ""
+    small = {"de", "del", "la", "las", "los", "y", "e", "a"}
+    parts = []
+    for i, w in enumerate(role.split()):
+        low = w.lower()
+        if i > 0 and low in small:
+            parts.append(low)
+        else:
+            parts.append(w[:1].upper() + w[1:] if w else w)
+    return " ".join(parts)
+
+
+def _format_person_role(name: str, cargo: str) -> str:
+    name = collapse_ws(name)
+    cargo = _title_case_role(cargo)
+    if not name:
+        return ""
+    if cargo:
+        return f"{name}, {cargo}"
+    return name
+
+
+def _is_lucy_name_or_role(name: str, cargo: str = "") -> bool:
+    blob = f"{name} {cargo}"
+    return mentions_lucy_person(blob, sucre_context=True) or _norm(name).startswith("lucy")
+
+
+def _person_is_agent(sentence: str, matcher) -> bool:
+    """True si la persona es sujeto de un verbo de agencia/habla, no el objeto."""
+    if not sentence or not matcher(sentence):
+        return False
+    verb = _AGENCY_VERBS_RE.search(sentence) or _SPEECH_VERBS_RE.search(sentence)
+    if not verb:
+        return False
+    before = sentence[: verb.start()]
+    after = sentence[verb.end():]
+    before_tail = before[-48:] if len(before) > 48 else before
+    if matcher(before) and not _OBJECT_PREP_RE.search(before_tail):
+        return True
+    # Inversión periodística: «…», afirmó la gobernadora / dijo Carlos Méndez
+    after_head = after.lstrip(" ,;:«»\"'")
+    if matcher(after_head[:70]) and re.match(
+        r"^(?:la\s+|el\s+)?(?:gobernador[a]|mandataria|lucy|secretari[oa]|[A-ZÁÉÍÓÚÑ])",
+        after_head,
+    ):
+        return True
+    before_u = unidecode(before.lower())
+    if re.search(r"\bsegun\s+", before_u) and matcher(sentence):
+        return True
+    return False
+
+
+def lucy_intervenes(title: str, body: str) -> bool:
+    sucre = article_anchors_sucre(title, body)
+
+    def _lucy(text: str) -> bool:
+        return mentions_lucy_person(text, sucre_context=sucre)
+
+    for sent in split_sentences(body):
+        if _person_is_agent(sent, _lucy):
+            return True
+    # Título como apoyo: confirma identidad, pero la intervención debe estar en el cuerpo.
+    # Si el cuerpo usa «la mandataria» y el título nombra a Lucy, ya cubierto por sucre_context.
+    return False
+
+
+def _secretary_belongs_to_sucre(role: str, sentence: str, title: str, body: str) -> bool:
+    blob = f"{role} {sentence}"
+    blob_n = _norm(blob)
+    if "sucre" in blob_n or "departamental" in blob_n or "gobernacion" in blob_n:
+        if _OTHER_DEPT_RE.search(role) and "sucre" not in _norm(role):
+            return False
+        return True
+    # Secretario departamental en una nota anclada a Sucre, sin otro departamento.
+    if article_anchors_sucre(title, body) and not _OTHER_DEPT_RE.search(blob):
+        return True
+    return False
+
+
+def _iter_named_secretaries(sentence: str) -> List[Tuple[str, str]]:
+    found: List[Tuple[str, str]] = []
+    seen = set()
+    for rx in (_SECRETARY_NAME_FIRST_RE, _SECRETARY_ROLE_FIRST_RE, _SECRETARY_ROLE_THEN_NAME_RE):
+        for m in rx.finditer(sentence):
+            name = collapse_ws(m.group("name"))
+            role = collapse_ws(m.group("role"))
+            role = re.sub(r"\s+", " ", role).rstrip(" ,.;")
+            if not looks_like_person_name(name):
+                continue
+            if _SECRETARIA_ENTITY_RE.fullmatch(name):
+                continue
+            key = _norm(f"{name}|{role}")
+            if key in seen:
+                continue
+            seen.add(key)
+            found.append((name, role))
+    return found
+
+
+def named_secretaries_intervening(title: str, body: str) -> List[Tuple[str, str]]:
+    actors: List[Tuple[str, str]] = []
+    seen = set()
+    for sent in split_sentences(body):
+        for name, role in _iter_named_secretaries(sent):
+            if not _secretary_belongs_to_sucre(role, sent, title, body):
+                continue
+
+            def _this_person(text, _name=name):
+                return _name.lower() in (text or "").lower()
+
+            if not _person_is_agent(sent, _this_person) and not _person_is_agent(
+                sent, lambda t, r=role: r.lower() in (t or "").lower()
+            ):
+                continue
+            key = _norm(f"{name}|{role}")
+            if key in seen:
+                continue
+            seen.add(key)
+            actors.append((name, role))
+    return actors
+
+
 def _span_from_sentences(source: str, sentences: Sequence[str]) -> str:
-    kept = [s for s in sentences if s and s in source]
+    kept = [s for s in sentences if s and source and s in source]
     if not kept:
-        # intentar recuperación flexible oración a oración
         recovered = [recover_verbatim(s, source) for s in sentences]
         recovered = [s for s in recovered if s]
         return " ".join(recovered)
@@ -405,91 +584,68 @@ def _format_actors(actors: List[Tuple[str, str]]) -> str:
     for name, cargo in actors:
         name = collapse_ws(name or "")
         cargo = collapse_ws(cargo or "")
-        if not name or is_filler(name):
+        if not name or is_filler(name) or is_entity_only_label(name):
             continue
-        key = unidecode(f"{name}|{cargo}").lower()
+        if not looks_like_person_name(name) and not _is_lucy_name_or_role(name, cargo):
+            continue
+        if not cargo:
+            continue
+        key = _norm(f"{name}|{cargo}")
         if key in seen:
             continue
         seen.add(key)
-        if cargo and not is_filler(cargo):
-            parts.append(f"{name}, {cargo}")
-        else:
-            parts.append(name)
+        parts.append(_format_person_role(name, cargo))
     return "; ".join(parts)
 
 
-def _own_actors_from_sentence(sentence: str) -> List[Tuple[str, str]]:
+def _external_person_role(sentence: str) -> List[Tuple[str, str]]:
+    """Personas ajenas con nombre + cargo que hablan en la oración."""
     actors: List[Tuple[str, str]] = []
-    if mentions_lucy(sentence):
-        actors.append((LUCY_CANONICAL_NAME, LUCY_CANONICAL_CARGO))
-    for m in _SECRETARIA_RE.finditer(sentence):
-        label = collapse_ws(m.group(0))
-        actors.append((label[0].upper() + label[1:] if label else label, "Gobernación de Sucre"))
-    for m in _SECRETARIO_PERSONA_RE.finditer(sentence):
-        cargo = collapse_ws(m.group(0))
-        name = _person_name_near(sentence, m.start())
-        if name:
-            actors.append((name, cargo[0].upper() + cargo[1:] if cargo else cargo))
-        elif not any(a[0].lower().startswith("secretar") for a in actors):
-            actors.append((cargo[0].upper() + cargo[1:], "Gobernación de Sucre"))
-    for m in _VOCERO_RE.finditer(sentence):
-        cargo = collapse_ws(m.group(0))
-        name = _person_name_near(sentence, m.start())
-        actors.append((name or cargo[0].upper() + cargo[1:], "Gobernación de Sucre" if name else ""))
-    if mentions_gobernacion(sentence) and not actors:
-        actors.append((BRAND, ""))
-    return actors
+    # «Andrés Julián Rendón, Gobernador de Antioquia»
+    for m in re.finditer(
+        rf"(?P<name>{_NAME_TOKEN}(?:\s+(?:de\s+l[oa]s?\s+|de\s+|del\s+)?{_NAME_TOKEN}){{1,4}})"
+        r"\s*,\s*"
+        rf"(?P<role>{_ROLE_HINT_RE.pattern}(?:\s+de\s+[^.,;]{{2,40}})?)",
+        sentence,
+        flags=re.IGNORECASE,
+    ):
+        name = collapse_ws(m.group("name"))
+        role = collapse_ws(m.group("role"))
+        if looks_like_person_name(name) and not _is_lucy_name_or_role(name, role):
+            if re.match(r"gobernador[a]\s+de\s+sucre", role, re.I):
+                continue
+            actors.append((name, role))
 
-
-def _person_name_near(sentence: str, idx: int) -> str:
-    before = sentence[max(0, idx - 80): idx]
-    # "Juan Pérez, secretario..."
-    m = re.search(
-        r"([A-ZÁÉÍÓÚÑ][a-záéíóúñü]+(?:\s+(?:de\s+)?[A-ZÁÉÍÓÚÑ][a-záéíóúñü]+){0,3})\s*,\s*$",
-        before,
-    )
-    if m:
-        return collapse_ws(m.group(1))
-    after = sentence[idx: min(len(sentence), idx + 80)]
-    m = re.search(
-        r",\s*([A-ZÁÉÍÓÚÑ][a-záéíóúñü]+(?:\s+(?:de\s+)?[A-ZÁÉÍÓÚÑ][a-záéíóúñü]+){0,3})",
-        after,
-    )
-    if m:
-        return collapse_ws(m.group(1))
-    return ""
-
-
-def _external_actors_from_sentence(sentence: str) -> List[Tuple[str, str]]:
-    actors: List[Tuple[str, str]] = []
-    # "El senador X" / "la alcaldesa Y"
+    # «El senador Andrés Pérez» / «el alcalde Ricardo Hernández»
     for m in _ROLE_HINT_RE.finditer(sentence):
         role = collapse_ws(m.group(0))
-        if re.match(r"gobernador", role, re.I):
+        if re.match(r"gobernador[a]\s+de\s+sucre", sentence[m.start(): m.start() + 40], re.I):
             continue
-        window_before = sentence[max(0, m.start() - 8): m.end() + 1]
-        if mentions_lucy(window_before) or re.search(r"gobernador[a]\s+de\s+sucre", window_before, re.I):
+        if mentions_lucy_person(sentence[max(0, m.start() - 12): m.end() + 8], sucre_context=True):
             continue
-        after = sentence[m.end(): m.end() + 90]
-        name_m = re.search(
-            r"^\s*(?:de\s+([A-ZÁÉÍÓÚÑ][a-záéíóúñü]+(?:\s+[A-ZÁÉÍÓÚÑ][a-záéíóúñü]+){0,2})\s*,?\s*)?"
-            r"([A-ZÁÉÍÓÚÑ][a-záéíóúñü]+(?:\s+(?:de\s+)?[A-ZÁÉÍÓÚÑ][a-záéíóúñü]+){0,3})?",
+        after = sentence[m.end(): m.end() + 100]
+        place_m = re.match(
+            rf"^\s*(?:de\s+({_NAME_TOKEN}(?:\s+{_NAME_TOKEN}){{0,2}})\s*,?\s*)?"
+            rf"({_NAME_TOKEN}(?:\s+(?:de\s+)?{_NAME_TOKEN}){{1,3}})",
             after,
         )
-        name = ""
-        extra_role = ""
-        if name_m:
-            place = collapse_ws(name_m.group(1) or "")
-            person = collapse_ws(name_m.group(2) or "")
-            if place:
-                extra_role = f"{role} de {place}"
-            name = person
-        cargo = extra_role or (role[0].upper() + role[1:] if role else "")
-        if name and not mentions_own_entity(name) and not _ROLE_HINT_RE.match(name):
-            actors.append((name, cargo))
-        elif cargo and not mentions_lucy(cargo):
-            actors.append((cargo, ""))
+        if not place_m:
+            continue
+        place = collapse_ws(place_m.group(1) or "")
+        name = collapse_ws(place_m.group(2) or "")
+        if not looks_like_person_name(name):
+            continue
+        if _is_lucy_name_or_role(name, role):
+            continue
+        cargo = f"{role} de {place}" if place else role
+        actors.append((name, cargo))
     return actors
+
+
+def _external_speaks_about_brand(sentence: str, title: str, body: str) -> bool:
+    if not mentions_brand_or_lucy(sentence, sucre_context=article_anchors_sucre(title, body)):
+        return False
+    return bool(_SPEECH_VERBS_RE.search(sentence) or _AGENCY_VERBS_RE.search(sentence))
 
 
 def heuristic_tone(title: str, body: str) -> str:
@@ -501,83 +657,150 @@ def heuristic_tone(title: str, body: str) -> str:
     if pos and not neg:
         return "Positivo"
     if neg and pos:
-        # acusación suele pesar más si no hay agencia propia positiva
-        own = [s for s in split_sentences(blob) if _has_own_agency(s)]
-        own_text = " ".join(own)
-        if own_text and _POS_RE.search(own_text) and not _NEG_RE.search(own_text):
-            return "Positivo"
         return "Negativo"
     return "Neutro"
 
 
 def heuristic_analyze(titulo: str, cuerpo: str) -> Dict[str, str]:
-    title, body, combined = article_sources(titulo, cuerpo)
+    title, body, _combined = article_sources(titulo, cuerpo)
     result = empty_result()
-    if not combined:
+    if not body and not title:
         return result
 
-    body_sents = split_sentences(body)
-    title_sents = split_sentences(title) if title else []
+    sucre = article_anchors_sucre(title, body)
 
-    own_body = [s for s in body_sents if _has_own_agency(s)]
-    own_title = [s for s in title_sents if _has_own_agency(s)]
-    own_agency = own_body or own_title
-    lucy_agency = [s for s in own_agency if mentions_lucy(s)]
-    # Prioridad: lo que Lucy dijo/hizo; si no interviene, la Gobernación / secretarías
-    own_sents = lucy_agency or own_agency
-    extract_source = body if own_body else combined
-
-    ext_sents = [
-        s for s in body_sents
-        if mentions_own_entity(s) and _external_speaker_in(s)
-    ]
-    mention_sents = [
-        s for s in body_sents
-        if mentions_own_entity(s) and s not in own_sents and s not in ext_sents
-    ]
+    def _lucy(text: str) -> bool:
+        return mentions_lucy_person(text, sucre_context=sucre)
 
     own_actors: List[Tuple[str, str]] = []
-    for s in own_sents:
-        own_actors.extend(_own_actors_from_sentence(s))
+    own_sents: List[str] = []
+    if lucy_intervenes(title, body):
+        own_actors.append((LUCY_CANONICAL_NAME, LUCY_CANONICAL_CARGO))
+        own_sents.extend(s for s in split_sentences(body) if _person_is_agent(s, _lucy))
+
+    for name, role in named_secretaries_intervening(title, body):
+        own_actors.append((name, role))
+        for s in split_sentences(body):
+            if name.lower() in s.lower() and s not in own_sents:
+                if _person_is_agent(s, lambda t, n=name: n.lower() in (t or "").lower()):
+                    own_sents.append(s)
 
     ext_actors: List[Tuple[str, str]] = []
-    for s in ext_sents:
-        ext_actors.extend(_external_actors_from_sentence(s))
+    ext_sents: List[str] = []
+    for s in split_sentences(body):
+        if not _external_speaks_about_brand(s, title, body):
+            continue
+        people = _external_person_role(s)
+        people = [
+            (n, r) for n, r in people
+            if looks_like_person_name(n)
+            and not is_entity_only_label(n)
+            and not _is_lucy_name_or_role(n, r)
+            and not re.match(r"gobernador[a]\s+de\s+sucre", r or "", re.I)
+        ]
+        if not people:
+            continue
+        ext_actors.extend(people)
+        ext_sents.append(s)
 
-    own_span = _span_from_sentences(extract_source, own_sents) if own_sents else ""
-    if not own_span and own_sents:
-        own_span = " ".join(own_sents)
-
-    if ext_sents:
-        ext_span = _span_from_sentences(body or combined, ext_sents)
-    elif mention_sents and not own_sents:
-        ext_span = _span_from_sentences(body or combined, mention_sents)
-    else:
-        ext_span = ""
+    own_span = recover_verbatim(_span_from_sentences(body, own_sents), body) if own_sents else ""
+    ext_span = recover_verbatim(_span_from_sentences(body, ext_sents), body) if ext_sents else ""
 
     result[COL_TONO] = heuristic_tone(title, body)
     result[COL_PROPIOS] = _format_actors(own_actors)
-    result[COL_INT_PROPIA] = recover_verbatim(own_span, combined, body, title)
+    result[COL_INT_PROPIA] = own_span if result[COL_PROPIOS] else ""
     result[COL_EXTERNOS] = _format_actors(ext_actors)
-    result[COL_MENCION_EXT] = recover_verbatim(ext_span, combined, body, title)
-    return result
+    result[COL_MENCION_EXT] = ext_span if result[COL_EXTERNOS] else ""
+    return enforce_people_only(result, title, body)
+
+
+def parse_actor_list(raw: str) -> List[Tuple[str, str]]:
+    if is_filler(raw):
+        return []
+    actors = []
+    for chunk in re.split(r"\s*;\s*", str(raw)):
+        chunk = collapse_ws(chunk)
+        if not chunk or is_filler(chunk):
+            continue
+        if "," in chunk:
+            name, cargo = chunk.split(",", 1)
+            actors.append((collapse_ws(name), collapse_ws(cargo)))
+        else:
+            actors.append((chunk, ""))
+    return actors
 
 
 def _sanitize_names(raw: str) -> str:
     if is_filler(raw):
         return ""
     text = collapse_ws(str(raw or ""))
-    # quitar notas editoriales entre paréntesis que no son cargo
     text = re.sub(r"\((?:sin\s+|no\s+|extracto|nota|columna)[^)]*\)", "", text, flags=re.I)
     return collapse_ws(text)
 
 
-def merge_analysis(llm: Optional[Dict[str, str]], heuristic: Dict[str, str], titulo: str, cuerpo: str) -> Dict[str, str]:
-    title, body, combined = article_sources(titulo, cuerpo)
-    sources = (combined, body, title)
+def enforce_people_only(result: Dict[str, str], titulo: str, cuerpo: str) -> Dict[str, str]:
+    """HARD rules: solo personas; Lucy solo si interviene; extractos literales de CuerpoEs."""
+    title, body, _ = article_sources(titulo, cuerpo)
+    out = dict(result)
+
+    lucy_ok = lucy_intervenes(title, body)
+    secretaries = {(_norm(n), _norm(r)) for n, r in named_secretaries_intervening(title, body)}
+    secretary_names = {_norm(n) for n, _r in named_secretaries_intervening(title, body)}
+
+    propios_ok: List[Tuple[str, str]] = []
+    for name, cargo in parse_actor_list(out.get(COL_PROPIOS, "")):
+        if is_entity_only_label(name) or is_entity_only_label(f"{name}, {cargo}".strip(", ")):
+            continue
+        if _is_lucy_name_or_role(name, cargo):
+            if lucy_ok:
+                propios_ok.append((LUCY_CANONICAL_NAME, LUCY_CANONICAL_CARGO))
+            continue
+        if not looks_like_person_name(name) or not cargo:
+            continue
+        if re.match(r"secretari[oa]\b", cargo, re.I):
+            if (_norm(name), _norm(cargo)) in secretaries or _norm(name) in secretary_names:
+                if _secretary_belongs_to_sucre(cargo, f"{name} {cargo}", title, body):
+                    propios_ok.append((name, cargo))
+            continue
+        # Otros cargos propios no están permitidos (solo Lucy o secretarios nombrados).
+        continue
+
+    externos_ok: List[Tuple[str, str]] = []
+    for name, cargo in parse_actor_list(out.get(COL_EXTERNOS, "")):
+        if is_entity_only_label(name):
+            continue
+        if _is_lucy_name_or_role(name, cargo):
+            continue
+        if not looks_like_person_name(name) or not cargo:
+            continue
+        if re.match(r"gobernador[a]\s+de\s+sucre", cargo, re.I):
+            continue
+        externos_ok.append((name, cargo))
+
+    own_extract = recover_verbatim(out.get(COL_INT_PROPIA, ""), body)
+    ext_extract = recover_verbatim(out.get(COL_MENCION_EXT, ""), body)
+
+    out[COL_PROPIOS] = _format_actors(propios_ok)
+    out[COL_EXTERNOS] = _format_actors(externos_ok)
+    out[COL_INT_PROPIA] = own_extract if out[COL_PROPIOS] else ""
+    out[COL_MENCION_EXT] = ext_extract if out[COL_EXTERNOS] else ""
+
+    for col in (COL_PROPIOS, COL_INT_PROPIA, COL_EXTERNOS, COL_MENCION_EXT):
+        if is_filler(out.get(col, "")):
+            out[col] = ""
+    return out
+
+
+def merge_analysis(
+    llm: Optional[Dict[str, str]],
+    heuristic: Dict[str, str],
+    titulo: str,
+    cuerpo: str,
+) -> Dict[str, str]:
+    title, body, _ = article_sources(titulo, cuerpo)
     base = dict(heuristic)
     if not llm:
-        return base
+        return enforce_people_only(base, title, body)
 
     tono = str(llm.get(COL_TONO) or llm.get("tono") or "").strip().capitalize()
     if tono in ("Positivo", "Negativo", "Neutro"):
@@ -591,30 +814,28 @@ def merge_analysis(llm: Optional[Dict[str, str]], heuristic: Dict[str, str], tit
     if externos:
         base[COL_EXTERNOS] = externos
     elif COL_EXTERNOS in llm or "nombre_cargo_externos" in llm:
-        # LLM vació explícitamente
         if not _sanitize_names(externos):
             base[COL_EXTERNOS] = ""
 
     int_propia_raw = llm.get(COL_INT_PROPIA) or llm.get("intervencion_propia") or ""
-    int_propia = recover_verbatim(str(int_propia_raw), *sources)
+    int_propia = recover_verbatim(str(int_propia_raw), body)
     if int_propia:
         base[COL_INT_PROPIA] = int_propia
-    elif int_propia_raw and not is_filler(str(int_propia_raw)):
-        # paráfrasis: caer a heurística ya presente
-        pass
 
     menc_raw = llm.get(COL_MENCION_EXT) or llm.get("mencion_externa") or ""
-    menc = recover_verbatim(str(menc_raw), *sources)
+    menc = recover_verbatim(str(menc_raw), body)
     if menc:
         base[COL_MENCION_EXT] = menc
-    elif menc_raw and not is_filler(str(menc_raw)):
-        pass
 
-    # Nunca rellenar con placeholders
-    for col in (COL_PROPIOS, COL_INT_PROPIA, COL_EXTERNOS, COL_MENCION_EXT):
-        if is_filler(base.get(col, "")):
-            base[col] = ""
-    return base
+    merged = enforce_people_only(base, title, body)
+    heur_ok = enforce_people_only(dict(heuristic), title, body)
+    if not merged[COL_PROPIOS] and heur_ok[COL_PROPIOS]:
+        merged[COL_PROPIOS] = heur_ok[COL_PROPIOS]
+        merged[COL_INT_PROPIA] = heur_ok[COL_INT_PROPIA]
+    if not merged[COL_EXTERNOS] and heur_ok[COL_EXTERNOS]:
+        merged[COL_EXTERNOS] = heur_ok[COL_EXTERNOS]
+        merged[COL_MENCION_EXT] = heur_ok[COL_MENCION_EXT]
+    return merged
 
 
 def _call_openai_sucre(client, model: str, brand: str, aliases: List[str], ctx: str, title: str, body: str) -> Dict[str, str]:
@@ -625,26 +846,28 @@ Alias a reconocer: {alias_txt}.
 Titular:
 \"\"\"{title}\"\"\"
 
-Cuerpo:
+Cuerpo (CuerpoEs):
 \"\"\"{body}\"\"\"
 
-Contexto anclado a la marca (oraciones donde aparece Lucy / Gobernación / secretarías):
+Contexto anclado a la marca:
 \"\"\"{ctx}\"\"\"
 
-Debes devolver JSON con:
+Devuelve JSON con:
 1. "tono": impacto reputacional SOBRE Lucy Inés García Montes y/o la Gobernación de Sucre: "Positivo", "Negativo" o "Neutro".
-   Si la mandataria o la Gobernación anuncian obras, entregas, inversión, respaldo o alianzas → Positivo.
-   Si hay denuncias, investigaciones, incumplimiento o críticas dirigidas a ellas → Negativo.
-   Hecho informativo sin juicio → Neutro.
-2. "nombre_cargo_propios": nombre y cargo SOLO si el actor que habla o actúa es Lucy Inés García Montes (Gobernadora de Sucre) o personas/entidades de la Gobernación de Sucre (secretarías, voceros departamentales, despacho). Varios se separan con "; ".
-3. "intervencion_propia": EXTRACTO LITERAL del Cuerpo (o del Título si hace falta) de lo que Lucy dijo/hizo; si ella no interviene, de lo que la Gobernación de Sucre dijo/hizo (resoluciones, acciones, comunicados).
-4. "nombre_cargo_externos": nombre y cargo de personas/entidades ajenas que hablan de o se refieren a Lucy / Gobernación de Sucre. Si no hay, cadena vacía.
-5. "mencion_externa": EXTRACTO LITERAL (A) del texto de la nota que menciona a Lucy/Gobernación cuando no es intervención propia, o (B) de la intervención del actor externo refiriéndose a ellas.
+2. "nombre_cargo_propios": SOLO personas (nombre + cargo) que INTERVIENEN en el Cuerpo.
+   Permitido únicamente:
+   - Lucy Inés García Montes / Lucy García Montes / Lucy Montes / Lucy García / Gobernadora de Sucre, SI ella habla o actúa.
+   - Un secretario o secretaria NOMBRADO/A de la Gobernación de Sucre (persona + cargo).
+   Si Lucy NO interviene, NO pongas su nombre.
+   PROHIBIDO como nombre/cargo (son entidades, no personas): «Secretaría de Educación departamental», «Gobernación de Sucre», «Ministerio del Interior», «Presidencia de la República» u otra entidad sola.
+3. "intervencion_propia": EXTRACTO LITERAL del CuerpoEs de lo que ESA PERSONA dijo o hizo. Sin intros, sin paráfrasis, sin notas editoriales.
+4. "nombre_cargo_externos": SOLO personas con nombre + cargo que hablan/opinan y se refieren a la Gobernación de Sucre o a Lucy. Ejemplo: «Andrés Julián Rendón, Gobernador de Antioquia». Nunca una entidad sola.
+5. "mencion_externa": EXTRACTO LITERAL del CuerpoEs de la intervención de esa persona refiriéndose a la Gobernación/Lucy.
 
-REGLAS ESTRICTAS DE EXTRACTOS:
-- Copia un tramo LITERAL del Cuerpo o del Título. Prohibido parafrasear, resumir o reordenar.
-- Prohibido intros ("Extracto:", "La nota dice:"), notas editoriales, comillas que no estén en el origen y paréntesis explicativos.
-- Prohibido rellenar: no escribas "(sin actor externo)", "N/A", "ninguno", "no aplica". Si no hay dato, usa "".
+REGLAS:
+- Extractos = copia literal del Cuerpo. Prohibido parafrasear.
+- Si no hay dato, usa "" (nunca «(sin actor externo)», N/A, ninguno).
+- Varios actores se separan con "; " en formato «Nombre Apellido, Cargo».
 
 Responde estrictamente en JSON:
 {{"tono": "...", "nombre_cargo_propios": "...", "intervencion_propia": "...", "nombre_cargo_externos": "...", "mencion_externa": "..."}}"""
@@ -655,8 +878,8 @@ Responde estrictamente en JSON:
             {
                 "role": "system",
                 "content": (
-                    "Auditor de medios en Colombia. Extrae tono institucional e intervenciones "
-                    "con citas literales; nunca parafrasees los extractos."
+                    "Auditor de medios. Extrae solo personas (nombre + cargo) e intervenciones "
+                    "con citas literales del cuerpo; nunca entidades sueltas ni paráfrasis."
                 ),
             },
             {"role": "user", "content": prompt},
@@ -702,8 +925,7 @@ def analyze_article(
 
 def enrich_sucre_rows(
     rows: List[dict],
-    titulo_key: str,
-    cuerpo_key: str,
+    km: dict,
     api_key: Optional[str] = None,
     model: str = DEFAULT_MODEL,
     progress_callback: Optional[Callable[[int, str], None]] = None,
@@ -716,17 +938,29 @@ def enrich_sucre_rows(
         from openai import OpenAI
         client = OpenAI(api_key=api_key)
 
-    n = len(rows)
+    n = sum(1 for r in rows if not r.get("is_duplicate"))
     if progress_callback:
-        progress_callback(72, f"Analizando {n} notas (tono e intervenciones)…")
+        progress_callback(90, f"Extrayendo actores e intervenciones Sucre ({n} notas)…")
+
+    titulo_key = km.get("titulo", "Título")
+
+    def _cuerpo_of(row: dict) -> str:
+        return (
+            row.get("Resumen - Aclaracion")
+            or row.get("resumen corto")
+            or row.get("CuerpoEs")
+            or row.get("Resumen")
+            or ""
+        )
 
     def _one(idx_row):
         idx, row = idx_row
-        titulo = row.get(titulo_key, "")
-        cuerpo = row.get(cuerpo_key, "")
+        if row.get("is_duplicate"):
+            empty = empty_result()
+            return idx, {k: "" for k in SUCRE_ACTOR_COLUMNS} | {COL_TONO: empty[COL_TONO]}
         result = analyze_article(
-            titulo,
-            cuerpo,
+            row.get(titulo_key, ""),
+            _cuerpo_of(row),
             client=client,
             model=model,
             brand=BRAND,
@@ -736,17 +970,19 @@ def enrich_sucre_rows(
         return idx, result
 
     completed = 0
-    if n == 0:
+    if not rows:
         return rows
 
-    with ThreadPoolExecutor(max_workers=max_workers if client else 1) as executor:
+    workers = max_workers if client else 1
+    with ThreadPoolExecutor(max_workers=workers) as executor:
         futures = [executor.submit(_one, (i, row)) for i, row in enumerate(rows)]
         for fut in as_completed(futures):
             idx, result = fut.result()
-            rows[idx].update(result)
+            for col in SUCRE_ACTOR_COLUMNS:
+                rows[idx][col] = result.get(col, "")
             completed += 1
-            if progress_callback and (completed % 8 == 0 or completed == n):
-                pct = 72 + int((completed / n) * 20)
-                progress_callback(pct, f"Analizando notas Sucre… {completed}/{n}")
+            if progress_callback and (completed % 8 == 0 or completed == len(rows)):
+                pct = 90 + int((completed / len(rows)) * 3)
+                progress_callback(min(93, pct), f"Actores Sucre… {completed}/{len(rows)}")
 
     return rows
