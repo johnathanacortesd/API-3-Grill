@@ -8,3 +8,5 @@ openai>=1.30.0
 rapidfuzz>=3.8.0
 scikit-learn>=1.6.1,<1.7.0
 joblib>=1.4.2
+requests>=2.31.0
+numpy>=1.26.0
