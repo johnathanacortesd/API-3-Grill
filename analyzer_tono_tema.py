@@ -930,6 +930,14 @@ def enrich_rows_with_ai(
         if progress_callback:
             progreso(93, 'Guarda del tono: %d Negativos sin señalamiento pasaron a Neutro' % len(corregidos))
 
+    # Guarda simetrica: la marca autora de un programa/obra propia no se queda en Neutro.
+    subidos = aplicar_guarda_positiva(grupos, etiquetas, brand, aliases)
+    if subidos:
+        _ULTIMO_RESUMEN['tono_subido_por_guarda'] = subidos
+        if progress_callback:
+            progreso(93, 'Guarda positiva: %d Neutros de programas u obras propias pasaron a Positivo'
+                     % len(subidos))
+
     # --- tema por reglas + lista cerrada ---
     temas, origen = asignar_temas(cfg, grupos, etiquetas, tax, progreso)
 
@@ -991,6 +999,25 @@ BLANCO_EMPRESA = re.compile(r'(una empresa|una compa[nñ][ií]a|una firma|una in
                             r'una planta|un matadero|una av[ií]cola|la empresa|la compa[nñ][ií]a)', re.I)
 NOMBRE_PROPIO = re.compile(r'(?<![.!?]\s)(?<![.!?])\b[A-ZÁÉÍÓÚÑ][a-záéíóúñ]{2,}')
 
+# --- Guarda positiva: la marca como AUTORA de un programa, obra o aporte propio ---
+# Los modelos pequeños infravaloran lo propio y dejan en Neutro el programa que la marca
+# puso en marcha. La regla del criterio se aplica aqui en codigo, igual que la guarda negativa.
+ACCION_POS_PAT = re.compile(
+    r'(entreg\w*|inaugur\w*|puesta en marcha|puso en marcha|puso al servicio|lan[cz]\w*|'
+    r'invirt\w*|invierte|destin\w*|aprob\w*|benefici\w*|abri\w*|abre|firm\w*|gestion\w*|'
+    r'capacit\w*|dot\w*|mejor\w*|implement\w*|adelant\w*|avanz\w*|articul\w*|apoy\w*|'
+    r'impuls\w*|socializ\w*|realiz\w*|ejecut\w*|brind\w*|adjudic\w*|instal\w*|constru\w*|'
+    r'habilit\w*|asign\w*|desembols\w*|ayud\w*|don\w*|subsidi\w*|anunc\w*)', re.I)
+# "anuncio" solo sube el tono si lo anunciado es un programa, obra o inversion
+POS_OBJ_PAT = re.compile(
+    r'(obra|programa|proyecto|inversi|construcci|beca|dotaci|plan (de|para)|jornada|v[ií]a|'
+    r'sede|colegi|convenio|alianza|ampliaci|equipamiento|recursos|kits|ayuda|apoyo|subsidio|'
+    r'comedor|hospital|parque|cancha|acueducto|alcantarillado|puesto de salud|centro de|'
+    r'modernizaci|pavimentaci|puente|escuela|matr[ií]cula|becas)', re.I)
+PETICION_PAT = re.compile(r'(pidi[oó]|pide|solicit\w*|exig\w*|reclam\w*|urge|deber[ií]a|debe|'
+                          r'deber[aá]n|espera que)', re.I)
+INFORME_PAT = re.compile(r'(informe|estudio|encuesta|diagn[oó]stico|panorama|balance|cifras|'
+                         r'estad[ií]sticas|alerta|advierte|advertir|revela|revel[oó]|denuncia\w*)', re.I)
 
 def _tema_negativo(texto: str) -> bool:
     return bool(VICTIMA_PAT.search(ctrl(texto)))
@@ -1030,4 +1057,43 @@ def aplicar_guarda_tono(grupos: Sequence[dict], etiquetas: Dict[int, dict],
         if _tema_negativo(texto) and not _critica_dirigida(texto, brand, aliases):
             e['tono'] = 'Neutro'
             corregidos.append(g['grupo'])
+    return corregidos
+
+
+def aplicar_guarda_positiva(grupos: Sequence[dict], etiquetas: Dict[int, dict],
+                            brand: str, aliases: Sequence[str]) -> List[int]:
+    """Sube a Positivo los Neutros donde la marca es AUTORA de un hecho favorable.
+
+    Simetrico de aplicar_guarda_tono. Solo interviene cuando el tono quedo Neutro, la marca o
+    uno de sus alias aparece como sujeto inmediato de una accion de entrega, obra, inversion,
+    programa o apoyo, y no hay critica dirigida ni se trata de un informe o alerta sobre un
+    problema ("entrego el informe X" no es un aporte). No toca Negativos ni Positivos.
+
+    Devuelve la lista de grupos corregidos (para la auditoria de la interfaz).
+    """
+    corregidos: List[int] = []
+    marcas = [nz(m) for m in [brand] + list(aliases or []) if m and len(str(m)) > 3]
+    if not marcas:
+        return corregidos
+    for g in grupos:
+        e = etiquetas.get(g['grupo'])
+        if not e or e.get('tono') != 'Neutro':
+            continue
+        texto = ctrl('%s %s' % (g['titulo'], g.get('texto', '')))
+        if not texto or _critica_dirigida(texto, brand, aliases):
+            continue
+        for m in ACCION_POS_PAT.finditer(texto):
+            antes = nz(texto[max(0, m.start() - 70):m.start()])
+            if not any(x in antes for x in marcas):
+                continue            # la marca no es el sujeto de la accion
+            if PETICION_PAT.search(texto[max(0, m.start() - 45):m.start()]):
+                continue            # "pidio a la entidad entregar..." no es accion propia
+            despues = texto[m.end(): m.end() + 60]
+            if INFORME_PAT.search(despues[:45]):
+                continue            # entregar/realizar un informe o estudio no es un aporte
+            if re.search(r'anunc', m.group(0), re.I) and not POS_OBJ_PAT.search(despues):
+                continue            # "anuncio que el desempleo crecio" no es un aporte propio
+            e['tono'] = 'Positivo'
+            corregidos.append(g['grupo'])
+            break
     return corregidos
