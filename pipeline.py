@@ -20,7 +20,7 @@ from openpyxl import load_workbook
 from openpyxl.utils.cell import column_index_from_string, coordinate_from_string, range_boundaries
 from unidecode import unidecode
 
-from ai_analyzer import enrich_rows_with_ai
+from analyzer_tono_tema import enrich_rows_with_ai, ultimo_resumen
 from pkl_classifier import (
     apply_pkl_classifiers,
     fill_classification_context,
@@ -845,9 +845,10 @@ def process_dossier(
     has_ai = bool(ai_config and ai_config.get("enabled"))
     tone_model, theme_model = _load_optional_pkl_models(ai_config)
     has_pkl = tone_model is not None or theme_model is not None
+    analisis = {}
 
     if has_ai:
-        emit_progress(progress, 70, "Iniciando análisis reputacional con IA…")
+        emit_progress(progress, 70, "Iniciando análisis de Tono, Tema y Sub-tema…")
         rows = enrich_rows_with_ai(
             rows=rows,
             km=KEY_MAP,
@@ -858,7 +859,9 @@ def process_dossier(
             progress_callback=progress,
             tone_model=tone_model,
             theme_model=theme_model,
+            extra=ai_config,
         )
+        analisis = ultimo_resumen()
     elif has_pkl:
         emit_progress(progress, 70, "Preparando textos para clasificadores PKL…")
         rows = fill_classification_context(
@@ -920,4 +923,5 @@ def process_dossier(
         "duplicates": total_rows - unique_rows,
         "process_duration": f"{duration:.2f}s",
         "medios_sin_mapear": medios_sin_region,
+        "analisis": analisis,
     }
