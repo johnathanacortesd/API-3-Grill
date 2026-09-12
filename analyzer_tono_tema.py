@@ -991,6 +991,7 @@ def enrich_rows_with_ai(
 CRITICA_PAT = re.compile(
     r'(denunci|cuestion|sancion|critic|rechaz|exig|acusa|se[nñ]al|demand|investiga|irregular|'
     r'sobrecosto|corrup|incumpl|multa|reclam|responsabiliz|se le atribuye)', re.I)
+CRITICA_PAT = re.compile(CRITICA_PAT.pattern.replace('investiga|', 'investiga(?!ci[oó]n)|'), re.I)
 VICTIMA_PAT = re.compile(
     r'(\brobo\b|roban|rob[oa]ron|hurto|atrac|asalt|accidente|\bmuert|fallec|herid|inundaci|'
     r'deslizamiento|incendio|sequ[ií]a|apag[oó]n|el ni[nñ]o|desempleo|suicid|\bprecio|alza|'
@@ -1007,13 +1008,23 @@ ACCION_POS_PAT = re.compile(
     r'invirt\w*|invierte|destin\w*|aprob\w*|benefici\w*|abri\w*|abre|firm\w*|gestion\w*|'
     r'capacit\w*|dot\w*|mejor\w*|implement\w*|adelant\w*|avanz\w*|articul\w*|apoy\w*|'
     r'impuls\w*|socializ\w*|realiz\w*|ejecut\w*|brind\w*|adjudic\w*|instal\w*|constru\w*|'
-    r'habilit\w*|asign\w*|desembols\w*|ayud\w*|don\w*|subsidi\w*|anunc\w*)', re.I)
+    r'habilit\w*|asign\w*|desembols\w*|ayud\w*|don\w*|subsidi\w*|anunc\w*|present\w*|'
+    r'gan[aáoó]\w*|ganaron|obtuv\w*|obtien\w*|recib\w*|acredit\w*|certific\w*|destac\w*|'
+    r'sobresal\w*|lider\w*|ocup\w*|desarroll\w*|organiz\w*|celebr\w*|acog\w*|'
+    r'llevar[aá] a cabo|llev[oó] a cabo|ser[aá] sede|es sede|estren\w*|fortalec\w*|'
+    r'atend\w*|capacit\w*|gradu\w*|titul\w*|posicion\w*|consolid\w*)', re.I)
 # "anuncio" solo sube el tono si lo anunciado es un programa, obra o inversion
+# Verbos que por si solos no bastan: exigen un objeto verificable despues
+VERBO_OBJ_REQ = re.compile(r'(anunc|present|desarroll|organiz|celebr|acog|llev|recib|atend|'
+                           r'ocup|destac|obtuv)', re.I)
 POS_OBJ_PAT = re.compile(
     r'(obra|programa|proyecto|inversi|construcci|beca|dotaci|plan (de|para)|jornada|v[ií]a|'
     r'sede|colegi|convenio|alianza|ampliaci|equipamiento|recursos|kits|ayuda|apoyo|subsidio|'
     r'comedor|hospital|parque|cancha|acueducto|alcantarillado|puesto de salud|centro de|'
-    r'modernizaci|pavimentaci|puente|escuela|matr[ií]cula|becas)', re.I)
+    r'modernizaci|pavimentaci|puente|escuela|matr[ií]cula|becas|conferencia|congreso|'
+    r'seminario|simposio|foro|feria|encuentro|evento|competenci|olimpiada|premio|'
+    r'reconocimiento|acreditaci|certificaci|ranking|laboratorio|biblioteca|'
+    r'investigaci|publicaci|art[ií]culo|convenio|intercambio|movilidad|pasant[ií]a)', re.I)
 PETICION_PAT = re.compile(r'(pidi[oó]|pide|solicit\w*|exig\w*|reclam\w*|urge|deber[ií]a|debe|'
                           r'deber[aá]n|espera que)', re.I)
 INFORME_PAT = re.compile(r'(informe|estudio|encuesta|diagn[oó]stico|panorama|balance|cifras|'
@@ -1067,7 +1078,10 @@ def aplicar_guarda_positiva(grupos: Sequence[dict], etiquetas: Dict[int, dict],
     Simetrico de aplicar_guarda_tono. Solo interviene cuando el tono quedo Neutro, la marca o
     uno de sus alias aparece como sujeto inmediato de una accion de entrega, obra, inversion,
     programa o apoyo, y no hay critica dirigida ni se trata de un informe o alerta sobre un
-    problema ("entrego el informe X" no es un aporte). No toca Negativos ni Positivos.
+    problema ("entrego el informe X" no es un aporte) ni el verbo generico sin objeto
+    verificable ("anuncio que el desempleo crecio"). Cubre tambien los eventos propios
+    (conferencias, congresos, ferias), los logros (premios, acreditaciones, ranking) y
+    el beneficio directo (kits, becas, atencion gratuita). No toca Negativos ni Positivos.
 
     Devuelve la lista de grupos corregidos (para la auditoria de la interfaz).
     """
@@ -1082,18 +1096,42 @@ def aplicar_guarda_positiva(grupos: Sequence[dict], etiquetas: Dict[int, dict],
         texto = ctrl('%s %s' % (g['titulo'], g.get('texto', '')))
         if not texto or _critica_dirigida(texto, brand, aliases):
             continue
-        for m in ACCION_POS_PAT.finditer(texto):
-            antes = nz(texto[max(0, m.start() - 70):m.start()])
-            if not any(x in antes for x in marcas):
-                continue            # la marca no es el sujeto de la accion
-            if PETICION_PAT.search(texto[max(0, m.start() - 45):m.start()]):
-                continue            # "pidio a la entidad entregar..." no es accion propia
-            despues = texto[m.end(): m.end() + 60]
-            if INFORME_PAT.search(despues[:45]):
-                continue            # entregar/realizar un informe o estudio no es un aporte
-            if re.search(r'anunc', m.group(0), re.I) and not POS_OBJ_PAT.search(despues):
-                continue            # "anuncio que el desempleo crecio" no es un aporte propio
-            e['tono'] = 'Positivo'
-            corregidos.append(g['grupo'])
-            break
+        # por ORACIONES: la marca mencionada en una frase no debe contagiar la siguiente
+        # (el titulo y el cuerpo llegan pegados, y sin esto "...la marca. El Gobierno anuncio..."
+        # hace que la accion del Gobierno parezca de la marca).
+        for oracion in _oraciones(g['titulo'], g.get('texto', '')):
+            if _accion_propia(oracion, marcas, brand, aliases):
+                e['tono'] = 'Positivo'
+                corregidos.append(g['grupo'])
+                break
     return corregidos
+
+
+def _oraciones(*bloques: str) -> List[str]:
+    """Parte cada bloque (titulo, cuerpo) en oraciones con sentido completo."""
+    salida: List[str] = []
+    for b in bloques:
+        for o in re.split(r'(?<=[.;:!?])\s+|\s*\n\s*', ctrl(b or '')):
+            o = o.strip()
+            if len(o) > 12:
+                salida.append(o)
+    return salida
+
+
+def _accion_propia(oracion: str, marcas: List[str], brand: str, aliases: Sequence[str]) -> bool:
+    """True si en ESTA oracion la marca es autora de un hecho favorable verificable."""
+    if not oracion or _critica_dirigida(oracion, brand, aliases):
+        return False
+    for m in ACCION_POS_PAT.finditer(oracion):
+        antes = nz(oracion[max(0, m.start() - 120):m.start()])
+        if not any(x in antes for x in marcas):
+            continue            # la marca no es el sujeto de la accion
+        if PETICION_PAT.search(oracion[max(0, m.start() - 45):m.start()]):
+            continue            # "pidio a la entidad entregar..." no es accion propia
+        despues = oracion[m.end(): m.end() + 90]
+        if INFORME_PAT.search(despues[:45]):
+            continue            # entregar/realizar un informe o estudio no es un aporte
+        if VERBO_OBJ_REQ.search(m.group(0)) and not POS_OBJ_PAT.search(despues):
+            continue            # verbo generico sin objeto verificable no es un aporte propio
+        return True
+    return False
