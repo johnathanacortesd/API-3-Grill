@@ -181,5 +181,46 @@ class TestMotorTonoTema(unittest.TestCase):
         self.assertEqual(A.derivar_reglas(['Salud Mental y Prevencion'])[0]['tema'], 'Salud Mental y Prevencion')
 
 
+    def test_guarda_positiva_sube_los_programas_propios(self):
+        casos = [
+            ("Gobernación de Sucre puso en marcha el programa de becas para 3.000 jóvenes",
+             "Gobernación de Sucre", ["Sucre"], "Positivo"),
+            ("La Universidad Simón Bolívar entregó el nuevo bloque de aulas en la sede norte",
+             "Universidad Simón Bolívar", ["la universidad"], "Positivo"),
+            ("La Universidad Simón Bolívar anunció una inversión de $20 mil millones para vías terciarias",
+             "Universidad Simón Bolívar", [], "Positivo"),
+            ("Universidad Simón Bolívar inauguró la nueva sede y entregó dotación a 12 colegios",
+             "Universidad Simón Bolívar", [], "Positivo"),
+            ("La Universidad Simón Bolívar presentó el informe Panorama de la Juventud: desempleo en alerta",
+             "Universidad Simón Bolívar", [], "Neutro"),
+            ("El estudio de la Universidad Simón Bolívar revela brechas de salud mental en jóvenes",
+             "Universidad Simón Bolívar", [], "Neutro"),
+            ("La Universidad Simón Bolívar anunció que el desempleo juvenil sigue creciendo",
+             "Universidad Simón Bolívar", [], "Neutro"),
+            ("Gobernadores del Caribe y la ANI evalúan el proyecto del canal del Dique",
+             "Gobernación de Sucre", ["Sucre"], "Neutro"),
+            ("El alcalde pidió a la Universidad Simón Bolívar entregar los recursos del convenio",
+             "Universidad Simón Bolívar", [], "Neutro"),
+            ("Vecinos denuncian que la Universidad Simón Bolívar no ha terminado la obra del bloque",
+             "Universidad Simón Bolívar", [], "Neutro"),
+            ("El Gobierno nacional anunció la construcción de un colegio; la Universidad Simón Bolívar "
+             "acompaña el proceso en la región",
+             "Universidad Simón Bolívar", [], "Neutro"),
+        ]
+        for texto, brand, aliases, esperado in casos:
+            grupos = [{'grupo': 1, 'titulo': texto, 'texto': texto}]
+            et = {1: {'tono': 'Neutro', 'sub_tema': 'x'}}
+            A.aplicar_guarda_positiva(grupos, et, brand, aliases)
+            self.assertEqual(et[1]['tono'], esperado, texto[:70])
+
+    def test_guarda_positiva_no_toca_negativos_ni_positivos(self):
+        for tono in ('Negativo', 'Positivo'):
+            grupos = [{'grupo': 1, 'titulo': 'La Universidad Simón Bolívar entregó obras',
+                       'texto': 'La Universidad Simón Bolívar entregó obras'}]
+            et = {1: {'tono': tono, 'sub_tema': 'x'}}
+            A.aplicar_guarda_positiva(grupos, et, 'Universidad Simón Bolívar', [])
+            self.assertEqual(et[1]['tono'], tono)
+
+
 if __name__ == '__main__':
     unittest.main()

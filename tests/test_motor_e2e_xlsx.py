@@ -129,7 +129,9 @@ def _modelo_simulado(cfg, mensajes, **kw):
         elif 'sancion' in texto or 'sobrecosto' in texto:
             salida.append({'id': i, 'sub_tema': 'Sanción por sobrecostos en obra', 'tono': 'Negativo'})
         else:
-            salida.append({'id': i, 'sub_tema': 'Entrega de nuevo bloque de aulas', 'tono': 'Positivo'})
+            # programa/obra propia de la marca: el modelo la infravalora y dice Neutro;
+            # la guarda positiva debe subirla a Positivo.
+            salida.append({'id': i, 'sub_tema': 'Entrega de nuevo bloque de aulas', 'tono': 'Neutro'})
     return json.dumps({'resultados': salida}, ensure_ascii=False)
 
 
@@ -216,6 +218,13 @@ class TestPortPuntaAPunta(unittest.TestCase):
     def test_critica_dirigida_a_la_marca_sigue_siendo_negativa(self):
         f3 = [f for f in self.filas if f['ID Noticia'] == 3][0]
         self.assertEqual(f3['Tono_IA'], 'Negativo')
+
+    def test_guarda_positiva_sube_el_programa_propio(self):
+        # el modelo dejo en Neutro la entrega de aulas de la propia marca; la guarda la sube
+        f1 = [f for f in self.filas if f['ID Noticia'] == 1][0]
+        self.assertEqual(f1['Tono_IA'], 'Positivo')
+        self.assertTrue(self.res['analisis'].get('tono_subido_por_guarda'),
+                        'la guarda positiva debe reportar el grupo corregido')
 
     def test_el_modelo_recibe_la_marca_y_el_modelo_configurado(self):
         capturado = {}

@@ -28,7 +28,7 @@ THEME_LIGHT_VARS = """
 :root,[data-testid="stApp"]{
     --bg:#f8f9fa;--s1:#ffffff;--s2:#f1f3f4;--s3:#e8eaed;
     --border:#dadce0;--border2:#bdc1c6;--border-focus:#f97316;
-    --text:#202124;--text2:#3c4043;--text3:#5f6368;--text4:#9aa0a6;
+    --text:#202124;--text2:#3c4043;--text3:#5f6368;--text4:#70757a;
     --accent:#f97316;--accent2:#ea580c;--accent3:#c2410c;
     --accent-bg:#fff7ed;--accent-bg2:#ffedd5;--accent-bdr:#fed7aa;
     --green:#059669;--green2:#047857;--green-bg:#ecfdf5;--green-bdr:#a7f3d0;
@@ -41,6 +41,10 @@ THEME_LIGHT_VARS = """
     --shadow-md:0 1px 3px rgba(60,64,67,0.12),0 4px 8px rgba(60,64,67,0.08);
     --shadow-lg:0 2px 6px rgba(60,64,67,0.1),0 8px 24px rgba(60,64,67,0.1);
     --transition:all 0.2s cubic-bezier(0.4,0,0.2,1);
+    --info-bg:#e8f1ff;--info-bdr:#bcd7f5;--info-fg:#0b57d0;
+    --warn-bg:#fef7e0;--warn-bdr:#fde293;--warn-fg:#8a5a00;
+    --err-bg:#fdecea;--err-bdr:#f5c6c2;--err-fg:#b3261e;
+    color-scheme:light;
 }
 """
 
@@ -61,6 +65,11 @@ THEME_DARK_VARS = """
     --shadow-md:0 1px 3px rgba(0,0,0,0.45),0 4px 8px rgba(0,0,0,0.3);
     --shadow-lg:0 2px 6px rgba(0,0,0,0.4),0 8px 24px rgba(0,0,0,0.35);
     --transition:all 0.2s cubic-bezier(0.4,0,0.2,1);
+    --info-bg:#122337;--info-bdr:#1e3a5c;--info-fg:#7fb3ff;
+    --warn-bg:#2e2408;--warn-bdr:#5c4a12;--warn-fg:#fbbf24;
+    --err-bg:#33161a;--err-bdr:#6b2a2f;--err-fg:#f87171;
+    --text4:#8b93a1;
+    color-scheme:dark;
 }
 """
 
@@ -136,8 +145,8 @@ html,body,[data-testid="stApp"]{
 label[data-testid="stWidgetLabel"] p{font-family:'Google Sans',sans-serif!important;color:var(--text2)!important;font-size:0.82rem!important;font-weight:500!important;margin-bottom:0.15rem!important;}
 .stButton>button,[data-testid="stDownloadButton"]>button{background:var(--s1)!important;border:1.5px solid var(--border)!important;color:var(--text)!important;border-radius:100px!important;font-family:'Google Sans',sans-serif!important;font-weight:500!important;font-size:0.88rem!important;transition:var(--transition)!important;padding:0.5rem 1.2rem!important;box-shadow:none!important;}
 .stButton>button:hover,[data-testid="stDownloadButton"]>button:hover{border-color:var(--accent)!important;color:var(--accent2)!important;background:var(--accent-bg)!important;box-shadow:var(--shadow-sm)!important;transform:translateY(-1px)!important;}
-.stButton>button[kind="primary"],[data-testid="stDownloadButton"]>button[kind="primary"]{background:var(--accent)!important;border:none!important;color:#fff!important;font-weight:500!important;font-size:0.92rem!important;padding:0.6rem 1.5rem!important;box-shadow:0 1px 3px rgba(249,115,22,0.3),0 4px 12px rgba(249,115,22,0.15)!important;letter-spacing:0.01em!important;}
-.stButton>button[kind="primary"]:hover,[data-testid="stDownloadButton"]>button[kind="primary"]:hover{background:var(--accent2)!important;box-shadow:0 2px 6px rgba(234,88,12,0.35),0 8px 24px rgba(234,88,12,0.18)!important;transform:translateY(-1px)!important;color:#fff!important;}
+.stButton>button[kind="primary"],.stButton>button[kind="primaryFormSubmit"],[data-testid="stDownloadButton"]>button[kind="primary"]{background:var(--accent)!important;border:none!important;color:#fff!important;font-weight:500!important;font-size:0.92rem!important;padding:0.6rem 1.5rem!important;box-shadow:0 1px 3px rgba(249,115,22,0.3),0 4px 12px rgba(249,115,22,0.15)!important;letter-spacing:0.01em!important;}
+.stButton>button[kind="primary"]:hover,.stButton>button[kind="primaryFormSubmit"]:hover,[data-testid="stDownloadButton"]>button[kind="primary"]:hover{background:var(--accent2)!important;box-shadow:0 2px 6px rgba(234,88,12,0.35),0 8px 24px rgba(234,88,12,0.18)!important;transform:translateY(-1px)!important;color:#fff!important;}
 .success-banner{background:var(--success-bg);border:1px solid var(--green-bdr);border-left:4px solid var(--green);border-radius:var(--r2);padding:0.8rem 1.2rem;margin:0.5rem 0 0.8rem;display:flex;align-items:center;gap:0.8rem;}
 .success-icon{width:34px;height:34px;background:linear-gradient(135deg,#059669,#047857);border-radius:50%;display:flex;align-items:center;justify-content:center;color:white;font-size:1rem;flex-shrink:0;}
 .success-title{font-family:'Google Sans',sans-serif;font-size:1rem;font-weight:700;color:var(--success-title);margin-bottom:0.1rem}
@@ -185,6 +194,62 @@ div[data-testid="stAlert"]{border-radius:var(--r2)!important}
 [data-testid="stCheckbox"] p,[data-testid="stToggle"] p{color:var(--text2)!important}
 [data-baseweb="select"]>div,[data-baseweb="input"]{background:var(--s1)!important;color:var(--text)!important}
 .stMarkdown,.stCaption{color:var(--text2)}
+/* ===== Componentes nativos de Streamlit: el toggle del tema no los alcanza ===== */
+/* Streamlit 1.63 pinta estos con SU tema (config base=light), asi que en oscuro
+   quedaban cajas blancas y textos oscuros sobre fondo oscuro (contraste 1.08). */
+[data-testid="stFileUploaderDropzone"]{background:var(--s1)!important;border:1.5px dashed var(--border)!important;border-radius:var(--r)!important;color:var(--text2)!important}
+[data-testid="stFileUploaderDropzone"]:hover{border-color:var(--accent)!important;background:var(--accent-bg)!important}
+[data-testid="stFileUploaderDropzoneInstructions"],[data-testid="stFileUploaderDropzoneInstructions"] *{color:var(--text2)!important}
+[data-testid="stFileUploaderDropzoneInstructions"] span,[data-testid="stFileUploaderDropzoneInstructions"] small{color:var(--text3)!important}
+[data-testid="stFileUploaderDropzone"] button{background:var(--accent-bg)!important;border:1px solid var(--accent-bdr)!important;color:var(--accent2)!important;border-radius:100px!important;font-weight:500!important}
+[data-testid="stFileUploaderDropzone"] button:hover{background:var(--accent)!important;color:#fff!important;border-color:var(--accent)!important}
+[data-testid="stFileUploaderFile"],[data-testid="stFileUploaderFileName"],[data-testid="stFileUploaderFile"] small{color:var(--text)!important}
+[data-testid="stFileUploaderDeleteBtn"] button{background:transparent!important;border:none!important;color:var(--text3)!important}
+div[data-testid="stTextInputRootElement"],div[data-testid="stTextAreaRootElement"],div[data-testid="stNumberInputContainer"]{background:var(--s1)!important;border:1.5px solid var(--border)!important;border-radius:var(--r)!important;color:var(--text)!important}
+div[data-testid="stTextInputRootElement"]:focus-within{border-color:var(--accent)!important;box-shadow:0 0 0 3px rgba(249,115,22,0.12)!important}
+div[data-testid="stTextInputRootElement"] input,div[data-testid="stTextAreaRootElement"] textarea{background:transparent!important;color:var(--text)!important}
+div[data-testid="stTextInputRootElement"] input::placeholder{color:var(--text4)!important}
+div[data-testid="stSelectbox"] div[data-baseweb="select"]>div{background:var(--s1)!important;border-color:var(--border)!important;color:var(--text)!important}
+div[data-testid="stSelectbox"] div[data-baseweb="select"] input{color:var(--text)!important}
+div[data-testid="stSelectbox"] div[data-baseweb="select"] svg{fill:var(--text3)!important;color:var(--text3)!important}
+[data-baseweb="popover"] [role="listbox"]{background:var(--s1)!important;border:1px solid var(--border)!important}
+[data-baseweb="popover"] li[role="option"]{background:var(--s1)!important;color:var(--text)!important}
+[data-baseweb="popover"] li[role="option"]:hover,[data-baseweb="popover"] li[aria-selected="true"]{background:var(--s2)!important;color:var(--accent2)!important}
+[data-testid="stRadioOption"] p,[data-testid="stRadio"] label p,[data-testid="stRadio"] label div{color:var(--text2)!important}
+[data-testid="stRadioOption"] div[role="radio"],[data-testid="stRadio"] [role="radio"]{background:var(--s1)!important;border-color:var(--border2)!important}
+[data-testid="stRadioOption"] div[aria-checked="true"],[data-testid="stRadio"] [aria-checked="true"]{background:var(--accent)!important;border-color:var(--accent)!important}
+[data-testid="stCheckbox"] div[role="checkbox"],[data-testid="stCheckbox"] input+div{background:var(--s1)!important;border-color:var(--border2)!important}
+[data-testid="stCheckbox"] div[aria-checked="true"]{background:var(--accent)!important;border-color:var(--accent)!important}
+[data-testid="stToggle"] div[data-baseweb="checkbox"] div:first-child{background:var(--s3)!important}
+[data-testid="stSlider"] input{background:transparent!important}
+[data-testid="stSlider"] [data-baseweb="slider"] div[role="slider"]{background:var(--accent)!important;border-color:var(--accent)!important}
+[data-testid="stSlider"] [data-baseweb="slider"]>div>div{background:var(--s3)!important}
+[data-testid="stSliderThumbValue"],[data-testid="stTickBarMin"],[data-testid="stTickBarMax"]{color:var(--text3)!important;background:transparent!important}
+[data-testid="stExpander"]{border:1px solid var(--border)!important;border-radius:var(--r2)!important;background:var(--s1)!important;overflow:hidden}
+[data-testid="stExpander"] summary{background:var(--s1)!important;color:var(--text)!important}
+[data-testid="stExpander"] summary:hover{background:var(--s2)!important;color:var(--accent2)!important}
+[data-testid="stExpander"] summary p,[data-testid="stExpander"] summary span{color:inherit!important}
+[data-testid="stExpanderDetails"]{background:var(--bg)!important}
+[data-testid="stAlertContainer"]{background:var(--s1)!important;border:1px solid var(--border)!important;border-radius:var(--r2)!important}
+[data-testid="stAlertContentInfo"]{background:var(--info-bg)!important;border:1px solid var(--info-bdr)!important;border-radius:var(--r2)!important;color:var(--info-fg)!important}
+[data-testid="stAlertContentWarning"]{background:var(--warn-bg)!important;border:1px solid var(--warn-bdr)!important;border-radius:var(--r2)!important;color:var(--warn-fg)!important}
+[data-testid="stAlertContentError"]{background:var(--err-bg)!important;border:1px solid var(--err-bdr)!important;border-radius:var(--r2)!important;color:var(--err-fg)!important}
+[data-testid="stAlertContentSuccess"]{background:var(--green-bg)!important;border:1px solid var(--green-bdr)!important;border-radius:var(--r2)!important;color:var(--green2)!important}
+[data-testid="stAlertContentInfo"] p,[data-testid="stAlertContentWarning"] p,[data-testid="stAlertContentError"] p,[data-testid="stAlertContentSuccess"] p{color:inherit!important}
+[data-testid="stAlertDynamicIcon"]{color:inherit!important}
+[data-testid="stMarkdownContainer"] code{background:var(--s2)!important;color:var(--accent2)!important;border:1px solid var(--border)!important;border-radius:4px!important;padding:0.05rem 0.35rem!important;font-family:'Roboto Mono',monospace!important}
+[data-testid="stCaptionContainer"]{color:var(--text3)!important}
+[data-testid="stProgressBar"] p{color:var(--text2)!important}
+[data-testid="stTooltipContent"]{background:var(--s2)!important;color:var(--text)!important;border:1px solid var(--border)!important}
+/* Selectbox: en 1.63 es un ComboBox de react-aria (ya no usa data-baseweb) */
+[data-testid="stSelectbox"] [role="group"]{background:var(--s1)!important;border:1.5px solid var(--border)!important;border-radius:var(--r)!important;color:var(--text)!important}
+[data-testid="stSelectbox"] [role="group"]:focus-within{border-color:var(--accent)!important;box-shadow:0 0 0 3px rgba(249,115,22,0.12)!important}
+[data-testid="stSelectbox"] input{background:transparent!important;color:var(--text)!important}
+[data-testid="stSelectbox"] input::placeholder{color:var(--text4)!important}
+[data-testid="stSelectbox"] svg{fill:var(--text3)!important;color:var(--text3)!important}
+[role="listbox"],.react-aria-Popover,.react-aria-ListBox{background:var(--s1)!important;border:1px solid var(--border)!important;border-radius:var(--r)!important;color:var(--text)!important}
+[role="option"]{background:var(--s1)!important;color:var(--text)!important}
+[role="option"]:hover,[role="option"][aria-selected="true"],[role="option"][data-focused]{background:var(--s2)!important;color:var(--accent2)!important}
 @media(max-width:768px){
     .metrics-grid{grid-template-columns:repeat(2,1fr)}
     .live-metrics{grid-template-columns:1fr 1fr 1fr}
@@ -664,6 +729,7 @@ def main():
             fallback = len(analisis.get("grupos_con_fallback") or [])
             errores = analisis.get("errores_api") or []
             guarda = len(analisis.get("tono_corregido_por_guarda") or [])
+            subidos = len(analisis.get("tono_subido_por_guarda") or [])
             votos = analisis.get("votos_tono")
             piezas = []
             if grupos:
@@ -672,6 +738,8 @@ def main():
                 piezas.append(f"tono verificado {votos}× por grupo")
             if guarda:
                 piezas.append(f"guarda del tono: {guarda} Negativos sin señalamiento pasaron a Neutro")
+            if subidos:
+                piezas.append(f"guarda positiva: {subidos} programas u obras propias pasaron a Positivo")
             if reglas is not None:
                 piezas.append(f"Tema por reglas: {reglas} · por IA: {por_llm or 0}")
             if cubos_nuevos:
