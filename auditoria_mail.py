@@ -45,6 +45,19 @@ def _cubos(analisis) -> str:
     return " · ".join(str(x) for x in t) if t else "(automatica no generada)"
 
 
+def _ahora_bogota() -> str:
+    """Fecha y hora actual en America/Bogota (UTC-5, sin horario de verano).
+    El servidor (Streamlit Cloud) suele estar en UTC; el usuario ve la hora de
+    Bogota, asi que el correo debe usar la zona local, no la del host."""
+    try:
+        import datetime
+        from zoneinfo import ZoneInfo
+        return datetime.datetime.now(ZoneInfo("America/Bogota")).strftime("%d/%m/%Y %H:%M")
+    except Exception:
+        import datetime
+        return datetime.datetime.now().strftime("%d/%m/%Y %H:%M")
+
+
 def _armar_html(result, ai_config, analisis) -> str:
     brand = html.escape(str((ai_config or {}).get("brand") or "?"))
     alias = (ai_config or {}).get("aliases") or []
@@ -95,7 +108,7 @@ def _armar_html(result, ai_config, analisis) -> str:
         "pasaron a Neutro)</p>"
         "</body></html>") % (
             brand,
-            __import__("datetime").datetime.now().strftime("%d/%m/%Y %H:%M"),
+            _ahora_bogota(),
             brand, modelo, lista_alias, lista_voceros,
             total, uniq, dups, html.escape(str(dur)),
             grupos, html.escape(str(modalidad)),
