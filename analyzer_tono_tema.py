@@ -40,18 +40,80 @@ from catalogo_tono_tema import (
 )
 
 
-def _contexto_marca(texto: str, titulo: str, brand: str, aliases: Sequence[str]) -> str:
-    """Recorte alrededor de la mencion de la marca, para la columna 'Contexto analizado'.
+def _regex_coincidencia(brand: str, aliases: Sequence[str], voceros: Sequence[str]) -> List[str]:
+    """Regexes de marca + alias + voceros para localizar la evidencia en el texto."""
+    rx = []
+    alineados = [x for x in aliases if x and len(str(x).strip()) > 2]
+    vocs = [v for v in voceros if v and len(str(v).strip()) > 2]
+    for nombre in [brand] + list(alineados) + list(vocs):
+        n = nz(nombre)
+        if not n or len(n) < 3:
+            continue
+        # frase exacta con bordes de palabra
+        rx.append(r'(?<![a-z0-9])' + re.escape(n) + r'(?![a-z0-9])')
+    return rx
 
-    Usa las funciones del motor anterior (ai_analyzer) cuando estan disponibles; si no, cae a un
-    recorte simple. Asi el motor de tono/tema no depende del paquete `openai` para funcionar.
+
+def _texto_hasta_terminal(texto: str, n: int) -> str:
+    """Recorta el texto terminando despues del n-esimo punto final (. ! ? …)."""
+    if not texto:
+        return ""
+    idx = -1
+    for _ in range(n):
+        m = re.search(r'[.!?\u2026]', texto[idx + 1:])
+        if not m:
+            break
+        idx = idx + 1 + m.end()
+    return texto[:idx + 1] if idx >= 0 else texto
+
+
+def _contexto_marca(texto: str, titulo: str, brand: str, aliases: Sequence[str],
+                    voceros: Optional[Sequence[str]] = None) -> str:
+    """Contexto de la marca para la columna 'Contexto analizado'.
+
+    Usa el algoritmo por párrafo (no por oración): busca el PRIMER párrafo que
+    menciona la marca, alias o vocero, lo recorta desde el punto final que lo
+    cierra, y si el trozo es corto (<10 palabras) lo extiende hasta un segundo
+    punto final. Cae a titulo+borde del texto si no hay mención clara.
     """
-    try:
-        from ai_analyzer import extract_brand_context, generate_brand_variants
-        regexes = generate_brand_variants(brand, aliases)
-        return extract_brand_context(texto, titulo, regexes)
-    except Exception:
-        return sq('%s %s' % (titulo, texto))[:300]
+    def _limpiar(s) -> str:
+        if not s:
+            return ""
+        s = str(s)
+        s = re.sub(r'https?://\S+', '', s)
+        s = re.sub(r'www\.\S+', '', s)
+        s = re.sub(r'^link\s*', '', s, flags=re.I)
+        return sq(s)
+
+    t_clean = _limpiar(titulo)
+    r_clean = _limpiar(texto)
+    rx = _regex_coincidencia(brand, aliases, voceros)
+
+    # separa por párrafos (salto de linea) y dentro de cada uno por oraciones
+    parrafos = [p.strip() for p in re.split(r'\n+', r_clean) if p.strip()]
+    for p in parrafos:
+        p_norm = nz(p)
+        if not rx or not any(re.search(r, p_norm) for r in rx):
+            continue
+        # inicio del párrafo (o de la 1a mención si el párrafo arranca con lead)
+        if len(p.split()) >= 10:
+            trozo = _texto_hasta_terminal(p, 1)
+        else:
+            trozo = _texto_hasta_terminal(p, 2) or p
+        if len(trozo.split()) < 10:
+            trozo = _texto_hasta_terminal(p, 2) or p
+        if trozo and len(trozo.split()) >= 6:
+            return trozo[:700]
+
+    # cae a titulo (si menciona) + borde del cuerpo
+    t_norm = nz(t_clean)
+    if rx and any(re.search(r, t_norm) for r in rx):
+        return (t_clean + '. ' + _texto_hasta_terminal(r_clean, 1)).strip()[:700] \
+            if r_clean else t_clean[:700]
+
+    # sin mención: un recorte del titular + primera oración del cuerpo
+    base = (t_clean + ' ' + _texto_hasta_terminal(r_clean, 1)) if r_clean else t_clean
+    return sq(base)[:700]
 
 BASE_URL_DEFECTO = "https://api.openai.com/v1"
 MODELO_DEFECTO = "gpt-4.1-nano-2025-04-14"
@@ -169,11 +231,35 @@ def construir_grupos(
     if len(base) > 1:
         t1 = process.cdist(tit, tit, scorer=fuzz.ratio, workers=-1) / 100.0
         t2 = process.cdist(tit, tit, scorer=fuzz.token_sort_ratio, workers=-1) / 100.0
+        t3 = process.cdist(tit, tit, scorer=fuzz.token_set_ratio, workers=-1) / 100.0
         import numpy as np
-        T = np.maximum(t1, t2)
+        T = np.maximum(t1, np.maximum(t2, t3))
         for i in range(len(base)):
             for j in np.where(T[i] >= umbral_titulo / 100.0)[0]:
                 if j > i and len(base[i]['ctit'] & base[j]['ctit']) >= MIN_PALABRAS_TITULO:
+                    uni(i, j)
+
+        # --- Señal de bolsa de palabras (orden-independiente): dos noticias
+        # parecidas pueden ordenar las palabras distinto. Se fusionan si Jaccard
+        # de las palabras de CONTENIDO supera un suelo y comparten mínimo de
+        # tokens. Cubre el caso real "Soledad fortalece la nutrición ... PAE" vs
+        # "Soledad pone la nutrición ... el PAE fortalece el seguimiento ...".
+        for i in range(len(base)):
+            wi = base[i]['ctit']
+            for j in range(i + 1, len(base)):
+                if find(i) == find(j):
+                    continue
+                wj = base[j]['ctit']
+                inter = wi & wj
+                if len(inter) < MIN_PALABRAS_TITULO:
+                    continue
+                union = wi | wj
+                if not union:
+                    continue
+                jac = len(inter) / len(union)
+                # piso de Jaccard para evtar fusionar hechos distintos que solo
+                # comparten pocas palabras comunes de la ciudad/entidad.
+                if jac >= 0.42 or (jac >= 0.32 and t3[i, j] >= 0.88):
                     uni(i, j)
 
     inv = defaultdict(set)
@@ -191,6 +277,28 @@ def construir_grupos(
         for j, inter in hits.items():
             if j > i and min(len(b['g5']), len(base[j]['g5'])) >= MIN_GRAMAS and \
                     inter / min(len(b['g5']), len(base[j]['g5'])) >= umbral_cuerpo / 100.0:
+                uni(i, j)
+
+    # --- bolsa de palabras del CUERPO: mismo hecho con título muy distinto ---
+    # Solo se evaluan pares que comparten AL MENOS un 5-gramo (via el indice inv),
+    # asi el costo queda cerca de lineal en lugar de O(n^2) en dossiers grandes.
+    for i, b in enumerate(base):
+        if len(b['g5']) < 8:
+            # cuerpos muy cortos usan token_set_ratio del texto plano
+            continue
+        candidatos = set()
+        for g in b['g5']:
+            for j in inv.get(g, ()):
+                if j != i:
+                    candidatos.add(j)
+        for j in candidatos:
+            if j < i or par[j] != j or find(i) == find(j):
+                continue
+            bj = base[j]
+            if len(bj['g5']) < 8:
+                continue
+            same_g = len(b['g5'] & bj['g5']) / max(1, min(len(b['g5']), len(bj['g5'])))
+            if same_g >= 0.70 and len(b['ctit'] & bj['ctit']) >= MIN_PALABRAS_TITULO:
                 uni(i, j)
 
     por_raiz = defaultdict(list)
@@ -850,58 +958,6 @@ def asignar_temas(cfg: dict, grupos: List[dict], etiquetas: Dict[int, dict], tax
 # ============================================================================
 # 8. Entrada compatible con el pipeline
 # ============================================================================
-def _url_fila(row: dict, km: dict) -> str:
-    """Extrae la URL de la nota desde Link Nota / Link (Streaming) / URL Nota."""
-    for clave in (km.get('link_nota'), km.get('link_streaming'), 'URL Nota', 'Link Nota'):
-        v = row.get(clave) if clave in row else None
-        if isinstance(v, dict):
-            v = v.get('url') or v.get('value')
-        if v and isinstance(v, str) and v.strip().lower().startswith('http'):
-            return v.strip()
-    return ''
-
-
-def _recuperar_cuerpos_incompletos(rows, km, api_key, base_url, modelo_ocr,
-                                   progreso, max_fetch: int = 40):
-    """Para filas no duplicadas cuyo cuerpo quedo truncado/incompleto, baja la
-    nota desde su URL y recupera el texto completo (OCR de imagen/PDF si hace
-    falta). Se hace una sola vez por URL. Actualiza 'Resumen - Aclaracion' con
-    el cuerpo fusionado para que el contexto y la agrupacion lo usen."""
-    from cuerpo_ocr import _parece_incompleto, fusionar_cuerpo, recuperar_cuerpo
-    pend = []
-    for i, row in enumerate(rows):
-        if row.get('is_duplicate'):
-            continue
-        cuerpo = str(_texto_fila(row, km) or '')
-        url = _url_fila(row, km)
-        if cuerpo and not _parece_incompleto(cuerpo):
-            continue
-        if not url:
-            continue
-        pend.append((i, url))
-    if not pend:
-        return 0
-    if progreso:
-        progreso(71, 'Recuperando cuerpos incompletos (link/OCR): %d notas…' % len(pend))
-    cache = {}
-    recuperados = 0
-    for i, url in pend[:max_fetch]:
-        llave = url.strip().lower()
-        if llave in cache:
-            rec = cache[llave]
-        else:
-            rec = recuperar_cuerpo(url, api_key, base_url or '', modelo_ocr)
-            cache[llave] = rec
-        if not rec:
-            continue
-        rows[i]['Resumen - Aclaracion'] = fusionar_cuerpo(
-            str(_texto_fila(rows[i], km) or ''), rec)
-        recuperados += 1
-    if recuperados and progreso:
-        progreso(71, 'Cuerpos recuperados: %d' % recuperados)
-    return recuperados
-
-
 def enrich_rows_with_ai(
     rows: List[dict],
     km: dict,
@@ -941,18 +997,6 @@ def enrich_rows_with_ai(
     umbral_cuerpo = int(extra.get('umbral_cuerpo') or UMBRAL_CUERPO_DEFECTO)
     progreso = progress_callback or (lambda pct, msg: None)
 
-    # --- recuperacion de cuerpos truncados/incompletos desde el link (OCR si
-    # hace falta), ANTES de extraer el contexto de marca ---
-    if extra.get('recuperar_cuerpo', True):
-        try:
-            _recuperar_cuerpos_incompletos(
-                rows, km, cfg['api_key'],
-                cfg.get('base_url') or BASE_URL_DEFECTO,
-                cfg.get('ocr_model') or 'gpt-4o-mini', progreso,
-                max_fetch=int(extra.get('max_fetch') or 40))
-        except Exception:
-            logger.exception('Fallo la recuperacion de cuerpos; se sigue con el cuerpo original.')
-
     # --- contexto de marca (funcion existente, se conserva para la columna de auditoria) ---
     progreso(71, 'Extrayendo contexto de la marca y sus variantes…')
     for row in rows:
@@ -960,7 +1004,8 @@ def enrich_rows_with_ai(
             row['Contexto analizado'] = '-'
         else:
             row['Contexto analizado'] = _contexto_marca(
-                _texto_fila(row, km), _titulo_fila(row, km), brand, aliases)
+                _texto_fila(row, km), _titulo_fila(row, km), brand, aliases,
+                voceros=cfg.get('voceros') or [])
 
     # --- agrupacion ---
     progreso(73, 'Agrupando notas equivalentes…')
