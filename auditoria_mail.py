@@ -23,7 +23,7 @@ def _cfg() -> Dict[str, str]:
         import streamlit as st
         src = st.secrets
         for k in ("SMTP_HOST", "SMTP_PORT", "SMTP_USER", "SMTP_PASSWORD",
-                  "SMTP_FROM", "USAGE_NOTIFY_EMAIL", "OCR_MODEL", "API_BASE_URL"):
+                  "SMTP_FROM", "USAGE_NOTIFY_EMAIL"):
             try:
                 if st.secrets.get(k):
                     c[k] = str(st.secrets.get(k))
