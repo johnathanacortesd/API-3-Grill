@@ -680,9 +680,7 @@ def generate_output_excel(rows, km, progress: ProgressCb = None, columns_to_use:
     fmt_plain_id = wb.add_format({"num_format": "0"})
 
     for i, col_name in enumerate(cols):
-        if col_name in ["Título", "Resumen - Aclaracion", "resumen corto", "Contexto analizado"] or (
-            col_name and ("extracto" in col_name.lower() or str(col_name).startswith("Nombre y cargo"))
-        ):
+        if col_name in ["Título", "Resumen - Aclaracion", "resumen corto", "Contexto analizado"]:
             ws.set_column(i, i, 55)
         elif col_name in ["Link Nota", "Link (Streaming - Imagen)"]:
             ws.set_column(i, i, 15)
@@ -793,6 +791,16 @@ def _write_xlsx_rows(ws, rows, km, n, step, progress, fmt_link, fmt_plain_hlink,
 # ======================================
 # Modelos PKL opcionales
 # ======================================
+def _contar_tonos(rows) -> dict:
+    from collections import Counter
+    c = Counter()
+    for r in rows or []:
+        if r.get("is_duplicate"):
+            continue
+        c[r.get("Tono_IA") or "?"] += 1
+    return dict(c)
+
+
 def _load_optional_pkl_models(ai_config: Optional[dict]):
     if not ai_config:
         return None, None
@@ -898,6 +906,7 @@ def process_dossier(
         emit_progress(progress, overall, msg)
 
     output_data = generate_output_excel(rows, KEY_MAP, progress=export_progress, columns_to_use=cols_to_export)
+    _conteo_tonos = _contar_tonos(rows)
     del rows, rows_expanded
     gc.collect()
     duration = time.time() - t0
@@ -915,7 +924,7 @@ def process_dossier(
     timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M')
     final_filename = f"{filename_prefix}_{timestamp}.xlsx"
 
-    return {
+    result = {
         "output_data": output_data,
         "output_filename": final_filename,
         "total_rows": total_rows,
@@ -924,4 +933,15 @@ def process_dossier(
         "process_duration": f"{duration:.2f}s",
         "medios_sin_mapear": medios_sin_region,
         "analisis": analisis,
+        "_filas": _conteo_tonos,
     }
+
+    # Auditoria de uso por correo (SMTP). Nunca interrumpe la corrida.
+    if ai_config:
+        try:
+            from auditoria_mail import enviar_auditoria_desde_resultado
+            enviar_auditoria_desde_resultado(result, ai_config)
+        except Exception:
+            logger.exception("Fallo al enviar la auditoria por correo (no interrumpe).")
+
+    return result
