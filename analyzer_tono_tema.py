@@ -49,9 +49,30 @@ def _regex_coincidencia(brand: str, aliases: Sequence[str], voceros: Sequence[st
         n = nz(nombre)
         if not n or len(n) < 3:
             continue
-        # frase exacta con bordes de palabra
+        # frase exacta con bordes de palabra, sobre texto normalizado
         rx.append(r'(?<![a-z0-9])' + re.escape(n) + r'(?![a-z0-9])')
     return rx
+
+
+def _mención_normalizada_en(p_norm: str, rx) -> bool:
+    return bool(rx) and any(re.search(r, p_norm) for r in rx)
+
+
+def _mención_bruta(texto: str, brand: str, aliases, voceros) -> Optional[int]:
+    """Devuelve el offset (en chars del texto crudo) de la primera mención de
+    la marca, un alias o un vocero, comparando sin acentos ni mayusculas.
+    Es el offset que sí se puede usar para recortar el texto original."""
+    palabras = ' '.join(texto.split()).split()  # crudas, sin saltos
+    for nombre in [brand] + [a for a in aliases if a] + [v for v in voceros if v]:
+        target = nz(nombre).split()
+        if not target or len(target) < 1:
+            continue
+        tlen = len(target)
+        for k in range(len(palabras) - tlen + 1):
+            if [nz(w) for w in palabras[k:k + tlen]] == target:
+                pos = sum(len(palabras[q]) + 1 for q in range(k))
+                return pos
+    return None
 
 
 def _texto_hasta_terminal(texto: str, n: int) -> str:
@@ -83,7 +104,9 @@ def _contexto_marca(texto: str, titulo: str, brand: str, aliases: Sequence[str],
         s = re.sub(r'https?://\S+', '', s)
         s = re.sub(r'www\.\S+', '', s)
         s = re.sub(r'^link\s*', '', s, flags=re.I)
-        return sq(s)
+        # conserva los saltos de linea (separan parrafos); normaliza el resto
+        s = re.sub(r'[ \t]+', ' ', s)
+        return s.strip()
 
     t_clean = _limpiar(titulo)
     r_clean = _limpiar(texto)
@@ -92,27 +115,31 @@ def _contexto_marca(texto: str, titulo: str, brand: str, aliases: Sequence[str],
     # separa por párrafos (salto de linea) y dentro de cada uno por oraciones
     parrafos = [p.strip() for p in re.split(r'\n+', r_clean) if p.strip()]
     for p in parrafos:
-        p_norm = nz(p)
-        if not rx or not any(re.search(r, p_norm) for r in rx):
+        if not _mención_normalizada_en(nz(p), rx):
             continue
-        # inicio del párrafo (o de la 1a mención si el párrafo arranca con lead)
-        if len(p.split()) >= 10:
-            trozo = _texto_hasta_terminal(p, 1)
-        else:
-            trozo = _texto_hasta_terminal(p, 2) or p
-        if len(trozo.split()) < 10:
-            trozo = _texto_hasta_terminal(p, 2) or p
+        # localiza la mención en el texto CRUDO para recortar con offset válido
+        pos = _mención_bruta(p, brand, aliases, voceros)
+        if pos is None:
+            continue
+        start = max(0, pos - 200)
+        segmento = p[start:]
+        trozo = _texto_hasta_terminal(segmento, 2)
+        # si el tramo queda corto, amplia hasta el punto que sigue a la marca
+        if len(trozo.split()) < 10 and pos < len(p):
+            trozo = _texto_hasta_terminal(p[pos:], 2) or trozo
         if trozo and len(trozo.split()) >= 6:
-            return trozo[:700]
+            return sq(trozo[:700])
 
-    # cae a titulo (si menciona) + borde del cuerpo
+    # cae a titulo (si menciona) + borde del cuerpo (primer parrafo no vacio)
     t_norm = nz(t_clean)
     if rx and any(re.search(r, t_norm) for r in rx):
-        return (t_clean + '. ' + _texto_hasta_terminal(r_clean, 1)).strip()[:700] \
-            if r_clean else t_clean[:700]
+        primer_parrafo = parrafos[0] if parrafos else ''
+        return (t_clean + '. ' + _texto_hasta_terminal(primer_parrafo, 1)).strip()[:700] \
+            if primer_parrafo else t_clean[:700]
 
     # sin mención: un recorte del titular + primera oración del cuerpo
-    base = (t_clean + ' ' + _texto_hasta_terminal(r_clean, 1)) if r_clean else t_clean
+    primer_parrafo = parrafos[0] if parrafos else ''
+    base = (t_clean + ' ' + _texto_hasta_terminal(primer_parrafo, 1)) if primer_parrafo else t_clean
     return sq(base)[:700]
 
 BASE_URL_DEFECTO = "https://api.openai.com/v1"
@@ -425,17 +452,34 @@ def cubo_valido(nombre, tax, permitir_nuevos=True):
 
 
 def _cubo_mas_cercano(sub_tema: str, titulo: str, tax: dict) -> str:
-    """Fallback determinista: el cubo con mas tokens en comun. Nunca devuelve 'Otros'."""
-    objetivo = set(re.findall(r'[a-z0-9ñ]+', nz('%s %s' % (sub_tema, titulo))))
+    """Fallback determinista: el cubo con mas tokens de CONTENIDO en comun (por
+    raiz) y, cuando no hay coincidencia lexica, el de mayor similitud de texto
+    (fuzzy). Nunca devuelve 'Otros'."""
+    from rapidfuzz import fuzz
+    objetivo = set()
+    for token in re.findall(r'[a-z0-9ñ]+', nz('%s %s' % (sub_tema, titulo))):
+        if token not in CONECT and token not in FILLER and token not in MARCO and len(token) > 3:
+            objetivo.add(raiz(token) if len(token) > 4 else token)
     mejor, score = None, -1
+    mejor_fz, best_fz = None, -1.0
+    sub_norm = nz('%s %s' % (sub_tema, titulo))
     for t in tax['temas']:
         if nz(t) in CUBO_PROHIBIDO:
             continue
         claves = set(re.findall(r'[a-z0-9ñ]+', nz(t)))
+        claves = claves | {raiz(c) if len(c) > 4 else c
+                           for c in claves if c not in CONECT and len(c) > 3}
         s = len(objetivo & claves)
         if s > score:
             mejor, score = t, s
-    return mejor or tax['temas'][0]
+        fz = fuzz.token_set_ratio(sub_norm, nz(t)) / 100.0
+        if fz > best_fz:
+            mejor_fz, best_fz = t, fz
+    if mejor is not None and score > 0:
+        return mejor
+    if mejor_fz and best_fz >= 0.45:
+        return mejor_fz
+    return tax['temas'][0]
 
 
 # ============================================================================
