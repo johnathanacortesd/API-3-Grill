@@ -64,6 +64,40 @@ THEME_DARK_VARS = """
 }
 """
 
+# ======================================
+# Overscrite del tema en MODO OSCURO (baseweb/select/popovers de Streamlit
+# conservan su propio tema claro; se fuerzan aqui solo cuando la app esta en
+# modo oscuro). Inyectado dentro del bloque <style>.
+# ======================================
+DARK_OVERRIDES = """
+[data-testid="stApp"] [data-baseweb="popover"],
+[data-testid="stApp"] [data-baseweb="popover"]>div,
+[data-testid="stApp"] [data-baseweb="menu"],
+[data-testid="stApp"] [role="listbox"],
+[data-testid="stSelectbox"] [data-baseweb="popover"]{
+    background:var(--s2)!important;color:var(--text)!important;border-color:var(--border)!important;
+}
+[data-testid="stApp"] [role="option"],
+[data-testid="stApp"] [data-baseweb="menu"] li{
+    color:var(--text)!important;background:var(--s2)!important;
+}
+[data-testid="stApp"] [role="option"]:hover,[data-testid="stApp"] [role="option"][aria-selected="true"]{
+    background:var(--accent-bg)!important;color:var(--text)!important;
+}
+[data-testid="stApp"] [data-baseweb="select"]>div{
+    background:var(--s1)!important;color:var(--text)!important;border-color:var(--border)!important;
+}
+[data-testid="stApp"] [data-baseweb="select"] [data-testid="stSelectbox"] div,
+[data-testid="stApp"] [data-baseweb="select"] *{ color:var(--text)!important; }
+[data-testid="stApp"] input,[data-testid="stApp"] textarea,[data-testid="stApp"] [contenteditable]{
+    color:var(--text)!important;background:var(--s1)!important;border-color:var(--border2)!important;
+}
+[data-testid="stApp"] [data-testid="stExpander"] [data-testid="stExpanderDetails"]{
+    background:var(--s1)!important;border-color:var(--border)!important;color:var(--text)!important;
+}
+@keyframes livePulse{}
+"""
+
 def _default_theme() -> str:
     try:
         theme_obj = getattr(getattr(st, "context", None), "theme", None)
@@ -82,11 +116,12 @@ def current_ui_theme() -> str:
 
 def load_custom_css():
     theme_vars = THEME_DARK_VARS if current_ui_theme() == "dark" else THEME_LIGHT_VARS
+    dark_extra = DARK_OVERRIDES if current_ui_theme() == "dark" else ""
     st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Google+Sans:wght@400;500;700&family=Google+Sans+Text:wght@400;500;700&family=Roboto+Mono:wght@400;500&display=swap');
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap');
-""" + theme_vars + """
+""" + theme_vars + dark_extra + """
 html,body,[data-testid="stApp"]{
     background:var(--bg)!important;color:var(--text)!important;
     font-family:'Google Sans Text','Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
@@ -407,6 +442,13 @@ def run_cleaning_process(df_file, file_meta=None, ai_config=None):
         "duplicates": result["duplicates"],
         "process_duration": result["process_duration"],
     })
+    st.session_state["filas_limitadas"] = result.get("filas_limitadas", False)
+    st.session_state["total_original"] = result.get("total_original", result["total_rows"])
+    if ai_config and ai_config.get("brand"):
+        st.session_state["ai_config"] = ai_config
+    if result.get("analisis"):
+        st.session_state["analisis_usado"] = result["analisis"]
+
 
 # ======================================
 # Interfaz de Usuario
@@ -597,6 +639,19 @@ def main():
                         except Exception as exc:
                             st.error(f"La lista de Temas (JSON) no es válida: {exc}")
                             st.stop()
+                    elif tax_nombre == "Automática según el archivo (recomendada)":
+                        # Reutiliza la taxonomía de la corrida previa del mismo cliente
+                        # para que los Temas no cambien entre períodos (Power BI).
+                        try:
+                            from historial_cliente import taxonomia_anterior
+                            previa = taxonomia_anterior(
+                                brand_input.strip(),
+                                extra={"historial_dir": st.secrets.get("HISTORIAL_DIR")})
+                            if previa and previa.get("temas"):
+                                tax_cargada = previa
+                                st.session_state["taxonomia_reutilizada"] = len(previa["temas"])
+                        except Exception:
+                            pass
                     tone_bytes = f_tono.getvalue() if f_tono else None
                     theme_bytes = f_tema.getvalue() if f_tema else None
                     try:
@@ -630,6 +685,8 @@ def main():
                             "umbral_cuerpo": int(umbral_cuerpo_input),
                             "api_key": api_key if enable_ai else None,
                             "model": "gpt-4.1-nano-2025-04-14",
+                            "max_filas": st.secrets.get("MAX_FILAS", "1000"),
+                            "historial_dir": st.secrets.get("HISTORIAL_DIR"),
                             "tone_pkl_bytes": tone_bytes,
                             "theme_pkl_bytes": theme_bytes,
                         }
@@ -713,6 +770,30 @@ def main():
           <div class="metric-card m-time"><div class="metric-val" style="color:var(--blue)">{dur}</div><div class="metric-lbl">Tiempo de Ejecución</div></div>
         </div>""", unsafe_allow_html=True)
         
+        _historial = []
+        try:
+            from historial_cliente import listar_historial
+            _sl = (st.session_state.get("ai_config") or {}).get("brand", "") or \
+                (st.session_state.get("pending_ai_config") or {}).get("brand", "")
+            if _sl:
+                _historial = listar_historial(_sl, extra=st.session_state.get("ai_config_extra") or {})
+        except Exception:
+            _historial = []
+        if st.session_state.get("taxonomia_reutilizada"):
+            st.info("Se reutilizó la lista de Temas de la corrida anterior del mismo cliente "
+                    f"({st.session_state['taxonomia_reutilizada']} cubos) para comparar entre períodos.")
+        if st.session_state.get("filas_limitadas"):
+            st.warning(f"⚠️ El dossier superó el límite de filas configurado "
+                       f"({st.session_state.get('total_original')} filas originales): solo se etiquetaron "
+                       f"las primeras {st.session_state.get('total_rows')}. Sube archivos más pequeños o "
+                       f"aumenta `max_filas` en los Secrets.")
+        if _historial:
+            with st.expander(f"Historial del cliente ({len(_historial)} corridas previas)"):
+                for h in _historial[:10]:
+                    st.markdown(f"- **{h.get('fecha','')}** · {h.get('unique_rows','')} únicas"
+                                f" · {h.get('total_rows','')} filas · {h.get('process_duration','')}s"
+                                f" · {len(h.get('taxonomia') or [])} temas · `{h.get('archivo','')}`")
+
         c1, c2 = st.columns(2)
         c1.download_button(
             "⬇ Descargar Xlsx Estructurado con IA",
