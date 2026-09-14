@@ -28,7 +28,7 @@ THEME_LIGHT_VARS = """
 :root,[data-testid="stApp"]{
     --bg:#f8f9fa;--s1:#ffffff;--s2:#f1f3f4;--s3:#e8eaed;
     --border:#dadce0;--border2:#bdc1c6;--border-focus:#f97316;
-    --text:#202124;--text2:#3c4043;--text3:#5f6368;--text4:#9aa0a6;
+    --text:#202124;--text2:#3c4043;--text3:#5f6368;--text4:#9aa0a6;--text-label:#202124;
     --accent:#f97316;--accent2:#ea580c;--accent3:#c2410c;
     --accent-bg:#fff7ed;--accent-bg2:#ffedd5;--accent-bdr:#fed7aa;
     --green:#059669;--green2:#047857;--green-bg:#ecfdf5;--green-bdr:#a7f3d0;
@@ -48,7 +48,7 @@ THEME_DARK_VARS = """
 :root,[data-testid="stApp"]{
     --bg:#121418;--s1:#1c1f26;--s2:#252830;--s3:#2e333c;
     --border:#3d4450;--border2:#5c6370;--border-focus:#f97316;
-    --text:#e8eaed;--text2:#c5c8ce;--text3:#9aa0a6;--text4:#6e7480;
+    --text:#e8eaed;--text2:#c5c8ce;--text3:#b8bcc4;--text4:#8f95a0;--text-label:#e2e4e8;
     --accent:#f97316;--accent2:#fb923c;--accent3:#fdba74;
     --accent-bg:#2a1c10;--accent-bg2:#3d2814;--accent-bdr:#9a5b28;
     --green:#34d399;--green2:#6ee7b7;--green-bg:#0f291e;--green-bdr:#065f46;
@@ -133,7 +133,8 @@ html,body,[data-testid="stApp"]{
 [data-testid="stFileUploader"] button:hover{background:var(--accent)!important;color:white!important;border-color:var(--accent)!important}
 [data-testid="stTextInput"] input{background:var(--s1)!important;border:1.5px solid var(--border)!important;color:var(--text)!important;border-radius:var(--r)!important;font-family:'Google Sans Text',sans-serif!important;font-size:0.9rem!important;padding:0.5rem 0.75rem!important;transition:var(--transition)!important;}
 [data-testid="stTextInput"] input:focus{border-color:var(--accent)!important;box-shadow:0 0 0 3px rgba(249,115,22,0.12)!important;}
-label[data-testid="stWidgetLabel"] p{font-family:'Google Sans',sans-serif!important;color:var(--text2)!important;font-size:0.82rem!important;font-weight:500!important;margin-bottom:0.15rem!important;}
+label[data-testid="stWidgetLabel"] p{font-family:'Google Sans',sans-serif!important;color:var(--text-label)!important;font-size:0.82rem!important;font-weight:600!important;margin-bottom:0.15rem!important;}
+[data-testid="stTextInput"] input::placeholder,[data-baseweb="input"]::placeholder,[data-testid="stTextInput"] input::placeholder{color:var(--text4)!important;opacity:0.9!important;}
 .stButton>button,[data-testid="stDownloadButton"]>button{background:var(--s1)!important;border:1.5px solid var(--border)!important;color:var(--text)!important;border-radius:100px!important;font-family:'Google Sans',sans-serif!important;font-weight:500!important;font-size:0.88rem!important;transition:var(--transition)!important;padding:0.5rem 1.2rem!important;box-shadow:none!important;}
 .stButton>button:hover,[data-testid="stDownloadButton"]>button:hover{border-color:var(--accent)!important;color:var(--accent2)!important;background:var(--accent-bg)!important;box-shadow:var(--shadow-sm)!important;transform:translateY(-1px)!important;}
 .stButton>button[kind="primary"],[data-testid="stDownloadButton"]>button[kind="primary"]{background:var(--accent)!important;border:none!important;color:#fff!important;font-weight:500!important;font-size:0.92rem!important;padding:0.6rem 1.5rem!important;box-shadow:0 1px 3px rgba(249,115,22,0.3),0 4px 12px rgba(249,115,22,0.15)!important;letter-spacing:0.01em!important;}
@@ -182,7 +183,8 @@ hr{border-color:var(--s3)!important;margin:0.5rem 0!important}
 .theme-bar .stButton>button{padding:0.35rem 0.85rem!important;font-size:0.78rem!important}
 .pkl-hint{font-size:0.78rem;color:var(--text3);margin:0.15rem 0 0.55rem;line-height:1.35}
 div[data-testid="stAlert"]{border-radius:var(--r2)!important}
-[data-testid="stCheckbox"] p,[data-testid="stToggle"] p{color:var(--text2)!important}
+[data-testid="stCheckbox"] p,[data-testid="stToggle"] p{color:var(--text-label)!important}
+[role="radiogroup"] label p,[data-testid="stRadio"] label p{color:var(--text-label)!important;font-size:0.85rem!important;}
 [data-baseweb="select"]>div,[data-baseweb="input"]{background:var(--s1)!important;color:var(--text)!important}
 .stMarkdown,.stCaption{color:var(--text2)}
 @media(max-width:768px){
@@ -628,10 +630,6 @@ def main():
                             "umbral_cuerpo": int(umbral_cuerpo_input),
                             "api_key": api_key if enable_ai else None,
                             "model": "gpt-4.1-nano-2025-04-14",
-                            "ocr_model": st.secrets.get("OCR_MODEL", "gpt-4o-mini"),
-                            "base_url": st.secrets.get("API_BASE_URL") or None,
-                            "recuperar_cuerpo": str(st.secrets.get("RECUPERAR_CUERPO", "true")).strip().lower() not in ("0", "false", "no"),
-                            "max_fetch": 40,
                             "tone_pkl_bytes": tone_bytes,
                             "theme_pkl_bytes": theme_bytes,
                         }
