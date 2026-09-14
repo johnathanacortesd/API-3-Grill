@@ -850,6 +850,58 @@ def asignar_temas(cfg: dict, grupos: List[dict], etiquetas: Dict[int, dict], tax
 # ============================================================================
 # 8. Entrada compatible con el pipeline
 # ============================================================================
+def _url_fila(row: dict, km: dict) -> str:
+    """Extrae la URL de la nota desde Link Nota / Link (Streaming) / URL Nota."""
+    for clave in (km.get('link_nota'), km.get('link_streaming'), 'URL Nota', 'Link Nota'):
+        v = row.get(clave) if clave in row else None
+        if isinstance(v, dict):
+            v = v.get('url') or v.get('value')
+        if v and isinstance(v, str) and v.strip().lower().startswith('http'):
+            return v.strip()
+    return ''
+
+
+def _recuperar_cuerpos_incompletos(rows, km, api_key, base_url, modelo_ocr,
+                                   progreso, max_fetch: int = 40):
+    """Para filas no duplicadas cuyo cuerpo quedo truncado/incompleto, baja la
+    nota desde su URL y recupera el texto completo (OCR de imagen/PDF si hace
+    falta). Se hace una sola vez por URL. Actualiza 'Resumen - Aclaracion' con
+    el cuerpo fusionado para que el contexto y la agrupacion lo usen."""
+    from cuerpo_ocr import _parece_incompleto, fusionar_cuerpo, recuperar_cuerpo
+    pend = []
+    for i, row in enumerate(rows):
+        if row.get('is_duplicate'):
+            continue
+        cuerpo = str(_texto_fila(row, km) or '')
+        url = _url_fila(row, km)
+        if cuerpo and not _parece_incompleto(cuerpo):
+            continue
+        if not url:
+            continue
+        pend.append((i, url))
+    if not pend:
+        return 0
+    if progreso:
+        progreso(71, 'Recuperando cuerpos incompletos (link/OCR): %d notas…' % len(pend))
+    cache = {}
+    recuperados = 0
+    for i, url in pend[:max_fetch]:
+        llave = url.strip().lower()
+        if llave in cache:
+            rec = cache[llave]
+        else:
+            rec = recuperar_cuerpo(url, api_key, base_url or '', modelo_ocr)
+            cache[llave] = rec
+        if not rec:
+            continue
+        rows[i]['Resumen - Aclaracion'] = fusionar_cuerpo(
+            str(_texto_fila(rows[i], km) or ''), rec)
+        recuperados += 1
+    if recuperados and progreso:
+        progreso(71, 'Cuerpos recuperados: %d' % recuperados)
+    return recuperados
+
+
 def enrich_rows_with_ai(
     rows: List[dict],
     km: dict,
@@ -888,6 +940,18 @@ def enrich_rows_with_ai(
     umbral_titulo = int(extra.get('umbral_titulo') or UMBRAL_TITULO_DEFECTO)
     umbral_cuerpo = int(extra.get('umbral_cuerpo') or UMBRAL_CUERPO_DEFECTO)
     progreso = progress_callback or (lambda pct, msg: None)
+
+    # --- recuperacion de cuerpos truncados/incompletos desde el link (OCR si
+    # hace falta), ANTES de extraer el contexto de marca ---
+    if extra.get('recuperar_cuerpo', True):
+        try:
+            _recuperar_cuerpos_incompletos(
+                rows, km, cfg['api_key'],
+                cfg.get('base_url') or BASE_URL_DEFECTO,
+                cfg.get('ocr_model') or 'gpt-4o-mini', progreso,
+                max_fetch=int(extra.get('max_fetch') or 40))
+        except Exception:
+            logger.exception('Fallo la recuperacion de cuerpos; se sigue con el cuerpo original.')
 
     # --- contexto de marca (funcion existente, se conserva para la columna de auditoria) ---
     progreso(71, 'Extrayendo contexto de la marca y sus variantes…')
@@ -929,14 +993,6 @@ def enrich_rows_with_ai(
         _ULTIMO_RESUMEN['tono_corregido_por_guarda'] = corregidos
         if progress_callback:
             progreso(93, 'Guarda del tono: %d Negativos sin señalamiento pasaron a Neutro' % len(corregidos))
-
-    # Guarda simetrica: la marca autora de un programa/obra propia no se queda en Neutro.
-    subidos = aplicar_guarda_positiva(grupos, etiquetas, brand, aliases)
-    if subidos:
-        _ULTIMO_RESUMEN['tono_subido_por_guarda'] = subidos
-        if progress_callback:
-            progreso(93, 'Guarda positiva: %d Neutros de programas u obras propias pasaron a Positivo'
-                     % len(subidos))
 
     # --- tema por reglas + lista cerrada ---
     temas, origen = asignar_temas(cfg, grupos, etiquetas, tax, progreso)
@@ -991,7 +1047,6 @@ def enrich_rows_with_ai(
 CRITICA_PAT = re.compile(
     r'(denunci|cuestion|sancion|critic|rechaz|exig|acusa|se[nñ]al|demand|investiga|irregular|'
     r'sobrecosto|corrup|incumpl|multa|reclam|responsabiliz|se le atribuye)', re.I)
-CRITICA_PAT = re.compile(CRITICA_PAT.pattern.replace('investiga|', 'investiga(?!ci[oó]n)|'), re.I)
 VICTIMA_PAT = re.compile(
     r'(\brobo\b|roban|rob[oa]ron|hurto|atrac|asalt|accidente|\bmuert|fallec|herid|inundaci|'
     r'deslizamiento|incendio|sequ[ií]a|apag[oó]n|el ni[nñ]o|desempleo|suicid|\bprecio|alza|'
@@ -1000,35 +1055,6 @@ BLANCO_EMPRESA = re.compile(r'(una empresa|una compa[nñ][ií]a|una firma|una in
                             r'una planta|un matadero|una av[ií]cola|la empresa|la compa[nñ][ií]a)', re.I)
 NOMBRE_PROPIO = re.compile(r'(?<![.!?]\s)(?<![.!?])\b[A-ZÁÉÍÓÚÑ][a-záéíóúñ]{2,}')
 
-# --- Guarda positiva: la marca como AUTORA de un programa, obra o aporte propio ---
-# Los modelos pequeños infravaloran lo propio y dejan en Neutro el programa que la marca
-# puso en marcha. La regla del criterio se aplica aqui en codigo, igual que la guarda negativa.
-ACCION_POS_PAT = re.compile(
-    r'(entreg\w*|inaugur\w*|puesta en marcha|puso en marcha|puso al servicio|lan[cz]\w*|'
-    r'invirt\w*|invierte|destin\w*|aprob\w*|benefici\w*|abri\w*|abre|firm\w*|gestion\w*|'
-    r'capacit\w*|dot\w*|mejor\w*|implement\w*|adelant\w*|avanz\w*|articul\w*|apoy\w*|'
-    r'impuls\w*|socializ\w*|realiz\w*|ejecut\w*|brind\w*|adjudic\w*|instal\w*|constru\w*|'
-    r'habilit\w*|asign\w*|desembols\w*|ayud\w*|don\w*|subsidi\w*|anunc\w*|present\w*|'
-    r'gan[aáoó]\w*|ganaron|obtuv\w*|obtien\w*|recib\w*|acredit\w*|certific\w*|destac\w*|'
-    r'sobresal\w*|lider\w*|ocup\w*|desarroll\w*|organiz\w*|celebr\w*|acog\w*|'
-    r'llevar[aá] a cabo|llev[oó] a cabo|ser[aá] sede|es sede|estren\w*|fortalec\w*|'
-    r'atend\w*|capacit\w*|gradu\w*|titul\w*|posicion\w*|consolid\w*)', re.I)
-# "anuncio" solo sube el tono si lo anunciado es un programa, obra o inversion
-# Verbos que por si solos no bastan: exigen un objeto verificable despues
-VERBO_OBJ_REQ = re.compile(r'(anunc|present|desarroll|organiz|celebr|acog|llev|recib|atend|'
-                           r'ocup|destac|obtuv)', re.I)
-POS_OBJ_PAT = re.compile(
-    r'(obra|programa|proyecto|inversi|construcci|beca|dotaci|plan (de|para)|jornada|v[ií]a|'
-    r'sede|colegi|convenio|alianza|ampliaci|equipamiento|recursos|kits|ayuda|apoyo|subsidio|'
-    r'comedor|hospital|parque|cancha|acueducto|alcantarillado|puesto de salud|centro de|'
-    r'modernizaci|pavimentaci|puente|escuela|matr[ií]cula|becas|conferencia|congreso|'
-    r'seminario|simposio|foro|feria|encuentro|evento|competenci|olimpiada|premio|'
-    r'reconocimiento|acreditaci|certificaci|ranking|laboratorio|biblioteca|'
-    r'investigaci|publicaci|art[ií]culo|convenio|intercambio|movilidad|pasant[ií]a)', re.I)
-PETICION_PAT = re.compile(r'(pidi[oó]|pide|solicit\w*|exig\w*|reclam\w*|urge|deber[ií]a|debe|'
-                          r'deber[aá]n|espera que)', re.I)
-INFORME_PAT = re.compile(r'(informe|estudio|encuesta|diagn[oó]stico|panorama|balance|cifras|'
-                         r'estad[ií]sticas|alerta|advierte|advertir|revela|revel[oó]|denuncia\w*)', re.I)
 
 def _tema_negativo(texto: str) -> bool:
     return bool(VICTIMA_PAT.search(ctrl(texto)))
@@ -1069,69 +1095,3 @@ def aplicar_guarda_tono(grupos: Sequence[dict], etiquetas: Dict[int, dict],
             e['tono'] = 'Neutro'
             corregidos.append(g['grupo'])
     return corregidos
-
-
-def aplicar_guarda_positiva(grupos: Sequence[dict], etiquetas: Dict[int, dict],
-                            brand: str, aliases: Sequence[str]) -> List[int]:
-    """Sube a Positivo los Neutros donde la marca es AUTORA de un hecho favorable.
-
-    Simetrico de aplicar_guarda_tono. Solo interviene cuando el tono quedo Neutro, la marca o
-    uno de sus alias aparece como sujeto inmediato de una accion de entrega, obra, inversion,
-    programa o apoyo, y no hay critica dirigida ni se trata de un informe o alerta sobre un
-    problema ("entrego el informe X" no es un aporte) ni el verbo generico sin objeto
-    verificable ("anuncio que el desempleo crecio"). Cubre tambien los eventos propios
-    (conferencias, congresos, ferias), los logros (premios, acreditaciones, ranking) y
-    el beneficio directo (kits, becas, atencion gratuita). No toca Negativos ni Positivos.
-
-    Devuelve la lista de grupos corregidos (para la auditoria de la interfaz).
-    """
-    corregidos: List[int] = []
-    marcas = [nz(m) for m in [brand] + list(aliases or []) if m and len(str(m)) > 3]
-    if not marcas:
-        return corregidos
-    for g in grupos:
-        e = etiquetas.get(g['grupo'])
-        if not e or e.get('tono') != 'Neutro':
-            continue
-        texto = ctrl('%s %s' % (g['titulo'], g.get('texto', '')))
-        if not texto or _critica_dirigida(texto, brand, aliases):
-            continue
-        # por ORACIONES: la marca mencionada en una frase no debe contagiar la siguiente
-        # (el titulo y el cuerpo llegan pegados, y sin esto "...la marca. El Gobierno anuncio..."
-        # hace que la accion del Gobierno parezca de la marca).
-        for oracion in _oraciones(g['titulo'], g.get('texto', '')):
-            if _accion_propia(oracion, marcas, brand, aliases):
-                e['tono'] = 'Positivo'
-                corregidos.append(g['grupo'])
-                break
-    return corregidos
-
-
-def _oraciones(*bloques: str) -> List[str]:
-    """Parte cada bloque (titulo, cuerpo) en oraciones con sentido completo."""
-    salida: List[str] = []
-    for b in bloques:
-        for o in re.split(r'(?<=[.;:!?])\s+|\s*\n\s*', ctrl(b or '')):
-            o = o.strip()
-            if len(o) > 12:
-                salida.append(o)
-    return salida
-
-
-def _accion_propia(oracion: str, marcas: List[str], brand: str, aliases: Sequence[str]) -> bool:
-    """True si en ESTA oracion la marca es autora de un hecho favorable verificable."""
-    if not oracion or _critica_dirigida(oracion, brand, aliases):
-        return False
-    for m in ACCION_POS_PAT.finditer(oracion):
-        antes = nz(oracion[max(0, m.start() - 120):m.start()])
-        if not any(x in antes for x in marcas):
-            continue            # la marca no es el sujeto de la accion
-        if PETICION_PAT.search(oracion[max(0, m.start() - 45):m.start()]):
-            continue            # "pidio a la entidad entregar..." no es accion propia
-        despues = oracion[m.end(): m.end() + 90]
-        if INFORME_PAT.search(despues[:45]):
-            continue            # entregar/realizar un informe o estudio no es un aporte
-        if VERBO_OBJ_REQ.search(m.group(0)) and not POS_OBJ_PAT.search(despues):
-            continue            # verbo generico sin objeto verificable no es un aporte propio
-        return True
-    return False
