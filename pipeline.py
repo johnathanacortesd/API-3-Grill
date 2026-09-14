@@ -845,22 +845,6 @@ def process_dossier(
     del df_normalized
     gc.collect()
 
-    # Límite de filas para análisis IA (evitar sobrecostos). Solo recorta lo que
-    # se etiqueta; si se pasa el tope se avisa y se procesan las primeras N.
-    try:
-        max_filas = int(ai_config.get("max_filas") or 1000) if ai_config else 1000
-    except Exception:
-        max_filas = 1000
-    total_origen = len(rows_expanded)
-    filas_limitadas = False
-    if total_origen > max_filas:
-        rows_expanded = rows_expanded[:max_filas]
-        filas_limitadas = True
-        emit_progress(
-            progress, 62,
-            f"⚠ Límite de {max_filas} filas activado: se analizan solo las primeras (de {total_origen}).",
-        )
-
     emit_progress(progress, 62, "Detectando duplicados…")
     rows = detectar_duplicados_avanzado(rows_expanded, KEY_MAP)
 
@@ -950,8 +934,6 @@ def process_dossier(
         "medios_sin_mapear": medios_sin_region,
         "analisis": analisis,
         "_filas": _conteo_tonos,
-        "filas_limitadas": filas_limitadas,
-        "total_original": total_origen,
     }
 
     # Auditoria de uso por correo (SMTP). Nunca interrumpe la corrida.
