@@ -50,17 +50,20 @@ BASE_OUTPUT_COLUMNS = [
     "Link Nota", "Resumen - Aclaracion", "Link (Streaming - Imagen)", "Menciones - Empresa",
     "ID duplicada",
 ]
-AI_OUTPUT_COLUMNS = ["Tono_IA", "Tema_IA", "Subtema_IA", "Contexto analizado"]
+# Inserted after Audiencia when AI/PKL is on. Contexto is never in this list.
+AI_COLUMNS_AFTER_AUDIENCIA = ["Tono_IA", "Tema_IA", "Subtema_IA"]
+CONTEXTO_COLUMN = "Contexto analizado"
 
 
 def build_export_columns(has_analysis: bool, extra_columns: Optional[List[str]] = None) -> List[str]:
-    """Grill base cols, then Tono/Tema/Subtema, optional extras, Contexto analizado last."""
+    """Tono/Tema/Subtema after Audiencia; extras keep relative placement; Contexto last."""
     cols = list(BASE_OUTPUT_COLUMNS)
     extras = [c for c in (extra_columns or []) if c not in cols]
     if has_analysis:
-        cols.extend(AI_OUTPUT_COLUMNS[:-1])
+        insert_at = cols.index("Audiencia") + 1
+        cols[insert_at:insert_at] = list(AI_COLUMNS_AFTER_AUDIENCIA)
         cols.extend(extras)
-        cols.append(AI_OUTPUT_COLUMNS[-1])
+        cols.append(CONTEXTO_COLUMN)
     else:
         cols.extend(extras)
     return cols
@@ -860,7 +863,7 @@ def process_dossier(
     emit_progress(progress, 62, "Detectando duplicados…")
     rows = detectar_duplicados_avanzado(rows_expanded, KEY_MAP)
 
-    # Orden de columnas: Tono_IA / Tema_IA / Subtema_IA y Contexto analizado al final.
+    # Tono_IA / Tema_IA / Subtema_IA after Audiencia; Contexto analizado last.
     has_ai = bool(ai_config and ai_config.get("enabled"))
     tone_model, theme_model = _load_optional_pkl_models(ai_config)
     has_pkl = tone_model is not None or theme_model is not None
