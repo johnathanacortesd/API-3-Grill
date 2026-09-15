@@ -13,6 +13,7 @@ import pandas as pd
 from unidecode import unidecode
 
 from pipeline import (
+    AI_OUTPUT_COLUMNS,
     BASE_OUTPUT_COLUMNS,
     KEY_MAP,
     _load_optional_pkl_models,
@@ -154,16 +155,17 @@ def process_sucre_dossier(
         progress_callback=progress,
     )
 
+    cols_to_export = list(BASE_OUTPUT_COLUMNS)
     if has_ai or has_pkl:
-        rev_idx = BASE_OUTPUT_COLUMNS.index("revalorización")
-        ai_cols = ["Contexto analizado", "Tono_IA", "Tema_IA", "Subtema_IA"]
-        cols_to_export = BASE_OUTPUT_COLUMNS[:rev_idx + 1] + ai_cols + BASE_OUTPUT_COLUMNS[rev_idx + 1:]
-    else:
-        cols_to_export = list(BASE_OUTPUT_COLUMNS)
+        # Tono/Tema/Subtema after the Grill base cols; Contexto analizado stays last.
+        cols_to_export.extend(AI_OUTPUT_COLUMNS[:-1])
 
     for col in SUCRE_ACTOR_COLUMNS:
         if col not in cols_to_export:
             cols_to_export.append(col)
+
+    if has_ai or has_pkl:
+        cols_to_export.append(AI_OUTPUT_COLUMNS[-1])
 
     emit_progress(progress, 94, "✓ Estructuración finalizada. Generando archivo Excel…")
 

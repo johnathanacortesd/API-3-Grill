@@ -142,6 +142,8 @@ class LinkExportStyleTests(unittest.TestCase):
         )
         for col in PLAIN_HYPERLINK_COLUMNS:
             self.assertIn(col, BASE_OUTPUT_COLUMNS)
+        self.assertNotIn("resumen corto", BASE_OUTPUT_COLUMNS)
+        self.assertNotIn("revalorización", BASE_OUTPUT_COLUMNS)
 
 
 if __name__ == "__main__":

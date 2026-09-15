@@ -30,8 +30,9 @@ por `analyzer_tono_tema.ultimo_resumen()` en `resultado["analisis"]`.
 
 ## 3. Invariantes (no negociables)
 
-- Las 4 columnas de análisis —`Contexto analizado`, `Tono_IA`, `Tema_IA`, `Subtema_IA`— se insertan
-  **después de `revalorización` y antes de `resumen corto`** (`BASE_OUTPUT_COLUMNS`).
+- Las 4 columnas de análisis —`Tono_IA`, `Tema_IA`, `Subtema_IA`, `Contexto analizado`— se
+  **añaden al final** del Excel (`BASE_OUTPUT_COLUMNS` + esas 4; `Contexto analizado` va última).
+  `resumen corto` y `revalorización` **no** se exportan.
 - Las filas duplicadas conservan `Tono_IA = "Duplicada"` y `Tema_IA = Subtema_IA = "-"`.
 - Firma de `enrich_rows_with_ai` y de `process_dossier`: no cambian (los llamadores no se tocan).
 - El motor **no** debe depender del paquete `openai` para arrancar: hace HTTP con `requests`.

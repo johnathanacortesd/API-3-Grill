@@ -2,7 +2,7 @@
 # Prueba de punta a punta del port: dossier XLSX real -> pipeline.process_dossier
 # Sin API: el modelo va simulado (analyzer_tono_tema.llamar_llm).
 # Verifica el contrato que el cliente ya usa: limpieza intacta, 4 columnas de
-# analisis insertadas despues de 'revalorización', guarda del tono y uniformidad
+# analisis al final (Contexto analizado última), guarda del tono y uniformidad
 # de etiquetas por grupo.
 # ======================================
 import io
@@ -164,11 +164,20 @@ class TestPortPuntaAPunta(unittest.TestCase):
         A.llamar_llm = self._real
 
     # --- contrato de salida -------------------------------------------------
-    def test_columnas_de_analisis_quedan_despues_de_revalorizacion(self):
-        i = self.cab.index('revalorización')
-        self.assertEqual(self.cab[i + 1:i + 5],
-                         ['Contexto analizado', 'Tono_IA', 'Tema_IA', 'Subtema_IA'])
-        self.assertEqual(self.cab[i + 5], 'resumen corto')
+    def test_columnas_de_analisis_quedan_al_final_con_contexto_ultimo(self):
+        self.assertNotIn('revalorización', self.cab)
+        self.assertNotIn('resumen corto', self.cab)
+        self.assertEqual(self.cab[-4:],
+                         ['Tono_IA', 'Tema_IA', 'Subtema_IA', 'Contexto analizado'])
+        self.assertEqual(self.cab[-1], 'Contexto analizado')
+
+    def test_resumen_aclaracion_termina_en_un_punto(self):
+        for f in self.filas:
+            body = str(f.get('Resumen - Aclaracion') or '')
+            if not body.strip():
+                continue
+            self.assertFalse(body.endswith('...'), body[-20:])
+            self.assertTrue(body.endswith('.'), body[-20:])
 
     def test_limpieza_intacta_filas_y_duplicados(self):
         self.assertEqual(self.res['total_rows'], 5)
