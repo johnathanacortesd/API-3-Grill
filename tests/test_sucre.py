@@ -440,6 +440,8 @@ class PipelineXlsxTests(unittest.TestCase):
             self.assertIn(col, headers)
         self.assertNotIn("Tono", headers)
         self.assertNotIn("Tono_IA", headers)
+        self.assertNotIn("resumen corto", headers)
+        self.assertNotIn("revalorización", headers)
 
         rows = list(ws.iter_rows(min_row=2, values_only=True))
         by_header = [{headers[i]: row[i] for i in range(len(headers))} for row in rows]
@@ -521,6 +523,9 @@ class PipelineXlsxTests(unittest.TestCase):
         self.assertIn("Tono_IA", df.columns)
         self.assertIn("Tema_IA", df.columns)
         self.assertIn("Subtema_IA", df.columns)
+        self.assertEqual(list(df.columns)[-1], "Contexto analizado")
+        self.assertNotIn("resumen corto", df.columns)
+        self.assertNotIn("revalorización", df.columns)
         for col in SUCRE_OUTPUT_COLUMNS:
             self.assertIn(col, df.columns)
         lucy = df[df["Título"].astype(str).str.contains("becas", case=False, na=False)].iloc[0]

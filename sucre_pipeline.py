@@ -13,9 +13,9 @@ import pandas as pd
 from unidecode import unidecode
 
 from pipeline import (
-    BASE_OUTPUT_COLUMNS,
     KEY_MAP,
     _load_optional_pkl_models,
+    build_export_columns,
     detectar_duplicados_avanzado,
     emit_progress,
     expand_menciones,
@@ -154,16 +154,7 @@ def process_sucre_dossier(
         progress_callback=progress,
     )
 
-    if has_ai or has_pkl:
-        rev_idx = BASE_OUTPUT_COLUMNS.index("revalorización")
-        ai_cols = ["Contexto analizado", "Tono_IA", "Tema_IA", "Subtema_IA"]
-        cols_to_export = BASE_OUTPUT_COLUMNS[:rev_idx + 1] + ai_cols + BASE_OUTPUT_COLUMNS[rev_idx + 1:]
-    else:
-        cols_to_export = list(BASE_OUTPUT_COLUMNS)
-
-    for col in SUCRE_ACTOR_COLUMNS:
-        if col not in cols_to_export:
-            cols_to_export.append(col)
+    cols_to_export = build_export_columns(has_ai or has_pkl, SUCRE_ACTOR_COLUMNS)
 
     emit_progress(progress, 94, "✓ Estructuración finalizada. Generando archivo Excel…")
 
