@@ -17,9 +17,11 @@ from pipeline import (  # noqa: E402
     AI_OUTPUT_COLUMNS,
     BASE_OUTPUT_COLUMNS,
     KEY_MAP,
+    build_export_columns,
     corregir_texto,
     generate_output_excel,
 )
+from sucre_analyzer import SUCRE_ACTOR_COLUMNS  # noqa: E402
 
 
 class BaseOutputColumnsTests(unittest.TestCase):
@@ -57,15 +59,33 @@ class BaseOutputColumnsTests(unittest.TestCase):
         wb.close()
 
         data_ai = generate_output_excel(
-            rows, KEY_MAP, columns_to_use=list(BASE_OUTPUT_COLUMNS) + list(AI_OUTPUT_COLUMNS)
+            rows, KEY_MAP, columns_to_use=build_export_columns(True)
         )
         wb = load_workbook(io.BytesIO(data_ai))
         headers = [c.value for c in wb["Resultado"][1]]
+        self.assertEqual(headers, build_export_columns(True))
         self.assertEqual(headers[-4:], list(AI_OUTPUT_COLUMNS))
         self.assertEqual(headers[-1], "Contexto analizado")
         self.assertNotIn("resumen corto", headers)
         self.assertNotIn("revalorización", headers)
         wb.close()
+
+    def test_build_export_columns_puts_contexto_last(self):
+        self.assertEqual(build_export_columns(False), list(BASE_OUTPUT_COLUMNS))
+        with_ai = build_export_columns(True)
+        self.assertEqual(with_ai[-4:], list(AI_OUTPUT_COLUMNS))
+        self.assertEqual(with_ai[-1], "Contexto analizado")
+
+        sucre = build_export_columns(True, SUCRE_ACTOR_COLUMNS)
+        self.assertEqual(sucre[-1], "Contexto analizado")
+        for col in SUCRE_ACTOR_COLUMNS:
+            self.assertLess(sucre.index(col), sucre.index("Contexto analizado"))
+        self.assertEqual(
+            sucre[-(len(SUCRE_ACTOR_COLUMNS) + 1):-1],
+            list(SUCRE_ACTOR_COLUMNS),
+        )
+        self.assertNotIn("resumen corto", sucre)
+        self.assertNotIn("revalorización", sucre)
 
 
 class CorregirTextoTests(unittest.TestCase):

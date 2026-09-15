@@ -52,6 +52,20 @@ BASE_OUTPUT_COLUMNS = [
 ]
 AI_OUTPUT_COLUMNS = ["Tono_IA", "Tema_IA", "Subtema_IA", "Contexto analizado"]
 
+
+def build_export_columns(has_analysis: bool, extra_columns: Optional[List[str]] = None) -> List[str]:
+    """Grill base cols, then Tono/Tema/Subtema, optional extras, Contexto analizado last."""
+    cols = list(BASE_OUTPUT_COLUMNS)
+    extras = [c for c in (extra_columns or []) if c not in cols]
+    if has_analysis:
+        cols.extend(AI_OUTPUT_COLUMNS[:-1])
+        cols.extend(extras)
+        cols.append(AI_OUTPUT_COLUMNS[-1])
+    else:
+        cols.extend(extras)
+    return cols
+
+
 KEY_MAP = {
     "idnoticia": "ID Noticia",
     "fecha": "Fecha",
@@ -886,9 +900,7 @@ def process_dossier(
             aliases=(ai_config or {}).get("aliases", []),
         )
 
-    cols_to_export = list(BASE_OUTPUT_COLUMNS)
-    if has_ai or has_pkl:
-        cols_to_export.extend(AI_OUTPUT_COLUMNS)
+    cols_to_export = build_export_columns(has_ai or has_pkl)
 
     emit_progress(progress, 94, "✓ Estructuración finalizada. Generando archivo Excel…")
 
