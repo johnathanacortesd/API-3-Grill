@@ -15,7 +15,7 @@ ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
-from pipeline import BASE_OUTPUT_COLUMNS, KEY_MAP, PLAIN_HYPERLINK_COLUMNS
+from pipeline import BASE_OUTPUT_COLUMNS, KEY_MAP, PLAIN_HYPERLINK_COLUMNS, build_export_columns
 from sucre_analyzer import (
     COL_EXTERNOS,
     COL_INT_PROPIA,
@@ -23,6 +23,7 @@ from sucre_analyzer import (
     COL_PROPIOS,
     COL_TONO,
     LUCY_CANONICAL_NAME,
+    SUCRE_ACTOR_COLUMNS,
     SUCRE_OUTPUT_COLUMNS,
     analyze_article,
     enforce_people_only,
@@ -442,6 +443,8 @@ class PipelineXlsxTests(unittest.TestCase):
         self.assertNotIn("Tono_IA", headers)
         self.assertNotIn("resumen corto", headers)
         self.assertNotIn("revalorización", headers)
+        self.assertEqual(headers, build_export_columns(False, SUCRE_ACTOR_COLUMNS))
+        self.assertEqual(headers[-len(SUCRE_ACTOR_COLUMNS):], list(SUCRE_ACTOR_COLUMNS))
 
         rows = list(ws.iter_rows(min_row=2, values_only=True))
         by_header = [{headers[i]: row[i] for i in range(len(headers))} for row in rows]
@@ -523,7 +526,13 @@ class PipelineXlsxTests(unittest.TestCase):
         self.assertIn("Tono_IA", df.columns)
         self.assertIn("Tema_IA", df.columns)
         self.assertIn("Subtema_IA", df.columns)
+        self.assertEqual(list(df.columns), build_export_columns(True, SUCRE_ACTOR_COLUMNS))
         self.assertEqual(list(df.columns)[-1], "Contexto analizado")
+        audiencia_i = list(df.columns).index("Audiencia")
+        self.assertEqual(
+            list(df.columns)[audiencia_i + 1:audiencia_i + 4],
+            ["Tono_IA", "Tema_IA", "Subtema_IA"],
+        )
         self.assertNotIn("resumen corto", df.columns)
         self.assertNotIn("revalorización", df.columns)
         for col in SUCRE_OUTPUT_COLUMNS:

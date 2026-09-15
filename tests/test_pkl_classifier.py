@@ -26,7 +26,7 @@ from pkl_classifier import (  # noqa: E402
     map_tone_label,
     text_for_classification,
 )
-from pipeline import BASE_OUTPUT_COLUMNS, KEY_MAP, process_dossier  # noqa: E402
+from pipeline import BASE_OUTPUT_COLUMNS, KEY_MAP, build_export_columns, process_dossier  # noqa: E402
 
 
 def _make_pipeline(texts, labels):
@@ -299,7 +299,13 @@ class PipelineNoPklVsPklTests(unittest.TestCase):
         self.assertIn("Tono_IA", df.columns)
         self.assertIn("Tema_IA", df.columns)
         self.assertIn("Subtema_IA", df.columns)
+        self.assertEqual(list(df.columns), build_export_columns(True))
         self.assertEqual(list(df.columns)[-1], "Contexto analizado")
+        audiencia_i = list(df.columns).index("Audiencia")
+        self.assertEqual(
+            list(df.columns)[audiencia_i + 1:audiencia_i + 4],
+            ["Tono_IA", "Tema_IA", "Subtema_IA"],
+        )
         self.assertNotIn("resumen corto", df.columns)
         self.assertNotIn("revalorización", df.columns)
         unique = df[df["Tono_IA"] != "Duplicada"]
